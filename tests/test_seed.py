@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
+
+import pytest
 
 import seed
 
@@ -127,3 +130,166 @@ def test_decisions_parsed_with_label_split():
 
     real = seed.parse_source()[1]
     assert real["decisions"] == []
+
+
+@pytest.fixture()
+def seeded_db(app_env):
+    import importlib
+
+    import db as db_module
+    import seed as seed_module
+
+    importlib.reload(db_module)
+    db_module.init_db()
+    return db_module, seed_module
+
+
+def test_seed_is_idempotent(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        first = conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
+    assert first == 20
+
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        second = conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"]
+    assert second == 20
+
+
+def test_seed_imports_both_projects_into_db(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        rows = conn.execute("SELECT slug FROM projects").fetchall()
+    assert {row["slug"] for row in rows} == {
+        "studio-portfolio-site",
+        "jemplayer82-web-design-ideas",
+    }
+
+
+def test_seed_real_project_items_have_correct_fields(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        project_id = conn.execute(
+            "SELECT id FROM projects WHERE slug = ?",
+            ("jemplayer82-web-design-ideas",),
+        ).fetchone()["id"]
+        rows = conn.execute(
+            "SELECT title, tag, kind, status, media_id, thumb_media_id "
+            "FROM items WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+
+    assert len(rows) == 18
+    assert all(row["kind"] == "image" for row in rows)
+    assert all(row["status"] == "ready" for row in rows)
+
+    mntn = next(row for row in rows if "mntn" in (row["title"] or "").lower())
+    assert mntn["tag"] == "layout + type"
+    assert mntn["media_id"] is not None
+    assert mntn["thumb_media_id"] is not None
+
+
+def test_seed_example_project_items_have_no_media(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        project_id = conn.execute(
+            "SELECT id FROM projects WHERE slug = ?",
+            ("studio-portfolio-site",),
+        ).fetchone()["id"]
+        rows = conn.execute(
+            "SELECT kind, media_id, thumb_media_id FROM items WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+
+    assert len(rows) == 2
+    assert all(row["kind"] == "note" for row in rows)
+    assert all(row["media_id"] is None for row in rows)
+    assert all(row["thumb_media_id"] is None for row in rows)
+
+
+def test_seed_swatches_in_db_have_valid_hex(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+    with db_module.connect() as conn:
+        rows = conn.execute("SELECT hex FROM swatches").fetchall()
+
+    assert len(rows) == 44
+    for row in rows:
+        assert re.fullmatch(r"#[0-9A-Fa-f]{6}", row["hex"])
+
+
+def test_seed_syntheses_and_decisions_rows(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+
+    with db_module.connect() as conn:
+        real_id = conn.execute(
+            "SELECT id FROM projects WHERE slug = ?",
+            ("jemplayer82-web-design-ideas",),
+        ).fetchone()["id"]
+        synth = conn.execute(
+            "SELECT version, direction_md, questions_json FROM syntheses "
+            "WHERE project_id = ?",
+            (real_id,),
+        ).fetchone()
+        real_decisions = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions WHERE project_id = ?",
+            (real_id,),
+        ).fetchone()["n"]
+
+        example_id = conn.execute(
+            "SELECT id FROM projects WHERE slug = ?",
+            ("studio-portfolio-site",),
+        ).fetchone()["id"]
+        example_decisions = conn.execute(
+            "SELECT source, status FROM decisions WHERE project_id = ?",
+            (example_id,),
+        ).fetchall()
+
+    assert synth is not None
+    assert synth["version"] == 1
+    assert "palette-hunting" in synth["direction_md"]
+    questions = json.loads(synth["questions_json"])
+    assert len(questions) == 5
+    assert all(q == {"question": q["question"], "why": ""} for q in questions)
+
+    assert real_decisions == 0
+    assert len(example_decisions) == 2
+    assert all(row["source"] == "user" for row in example_decisions)
+    assert all(row["status"] == "accepted" for row in example_decisions)
+
+
+def test_seed_media_files_written_to_disk(seeded_db):
+    db_module, seed_module = seeded_db
+    seed_module.run_seed_if_empty()
+
+    with db_module.connect() as conn:
+        item_row = conn.execute(
+            "SELECT media_id, thumb_media_id FROM items "
+            "WHERE media_id IS NOT NULL LIMIT 1"
+        ).fetchone()
+        full_media = conn.execute(
+            "SELECT path, mime, width, height, byte_size FROM media WHERE id = ?",
+            (item_row["media_id"],),
+        ).fetchone()
+        thumb_media = conn.execute(
+            "SELECT path, mime, width, height, byte_size FROM media WHERE id = ?",
+            (item_row["thumb_media_id"],),
+        ).fetchone()
+
+    full_path = db_module.MEDIA_DIR / full_media["path"]
+    thumb_path = db_module.MEDIA_DIR / thumb_media["path"]
+
+    assert full_path.is_file()
+    assert thumb_path.is_file()
+    assert full_path.stat().st_size == full_media["byte_size"]
+    assert thumb_path.stat().st_size == thumb_media["byte_size"]
+
+    assert full_media["mime"] == "image/jpeg"
+    assert thumb_media["mime"] == "image/webp"
+    assert full_media["width"] > 0 and full_media["height"] > 0
+    assert thumb_media["width"] > 0 and thumb_media["height"] > 0
