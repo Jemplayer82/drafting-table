@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -46,6 +47,7 @@ app = Flask(__name__)
 
 _PUBLIC_PATHS = {"/login", "/healthz"}
 _MEDIA_ID_RE = re.compile(r"[0-9a-f]{32}")
+_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 _MEDIA_EXT_BY_MIME = {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png"}
 
 
@@ -175,7 +177,7 @@ def board():  # noqa: ANN201
 
 
 @app.route("/media/<mid>")
-def media(mid):  # noqa: ANN201
+def media(mid):  # noqa: ANN001, ANN201
     if not _MEDIA_ID_RE.fullmatch(mid):
         return "", 404
     with db.connect() as conn:
@@ -189,6 +191,76 @@ def media(mid):  # noqa: ANN201
     resp = Response(media_path.read_bytes(), mimetype=row["mime"])
     resp.headers["Content-Disposition"] = f'inline; filename="media.{ext}"'
     return resp
+
+
+@app.route("/p/<slug>")
+def project_detail(slug):  # noqa: ANN001, ANN201
+    with db.connect() as conn:
+        proj = conn.execute(
+            "SELECT id, name, slug, note FROM projects WHERE slug = ? AND archived_at IS NULL",
+            (slug,),
+        ).fetchone()
+        if proj is None:
+            return "", 404
+        items = conn.execute(
+            "SELECT id, kind, status, source_url, title, tag, note_md, alt_text, "
+            "thumb_media_id, thumb_w, thumb_h, position FROM items "
+            "WHERE project_id = ? ORDER BY position, id",
+            (proj["id"],),
+        ).fetchall()
+        swatch_rows = []
+        if items:
+            item_ids = [i["id"] for i in items]
+            placeholders = ",".join("?" * len(item_ids))
+            swatch_rows = conn.execute(
+                f"SELECT item_id, hex, label FROM swatches WHERE item_id IN ({placeholders}) "
+                "ORDER BY item_id, position",
+                item_ids,
+            ).fetchall()
+        synthesis = conn.execute(
+            "SELECT direction_md, questions_json FROM syntheses "
+            "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+            (proj["id"],),
+        ).fetchone()
+        decision_rows = conn.execute(
+            "SELECT body_md, rationale_md FROM decisions "
+            "WHERE project_id = ? AND status = 'accepted' ORDER BY created_at",
+            (proj["id"],),
+        ).fetchall()
+
+    swatches_by_item = {}
+    for row in swatch_rows:
+        # Defense-in-depth: skip any hex that fails validation, even though
+        # seed.py already validated on the way in.
+        if not _HEX_RE.fullmatch(row["hex"] or ""):
+            continue
+        swatch = {"hex": row["hex"], "label": row["label"]}
+        swatches_by_item.setdefault(row["item_id"], []).append(swatch)
+    view_items = [
+        {**dict(item), "swatches": swatches_by_item.get(item["id"], [])}
+        for item in items
+    ]
+
+    direction_lines = []
+    if synthesis:
+        for line in synthesis["direction_md"].split("\n"):
+            stripped = line.strip()
+            if stripped:
+                direction_lines.append(stripped[2:] if stripped.startswith("- ") else stripped)
+    try:
+        questions = json.loads(synthesis["questions_json"]) if synthesis else []
+    except (json.JSONDecodeError, TypeError):
+        questions = []
+
+    decisions_view = []
+    for row in decision_rows:
+        label = row["rationale_md"].strip("*") if row["rationale_md"] else None
+        decisions_view.append({"label": label, "body_md": row["body_md"]})
+
+    return render_template(
+        "project.html", project=proj, items=view_items, direction_lines=direction_lines,
+        questions=questions, decisions=decisions_view, nonce=g.csp_nonce,
+    )
 
 
 if __name__ == "__main__":

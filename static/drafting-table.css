@@ -1,0 +1,221 @@
+/* ============================================================
+   Drafting Table — app layer, on top of Fathom Works (fathom.css)
+   ------------------------------------------------------------
+   fc-* = design system, never modified here.
+   dt-* = this app, BEM-ish, matching the fc- convention.
+   ============================================================ */
+
+:root {
+  /* --foam-500 (#6b7d8f) measures 4.39:1 on --depth-600 (panel) --
+     FAILS AA as body text inside a panel, and only passes on
+     --depth-800 by 0.04. A neutral step in the existing grey ramp,
+     not a new hue, so the one-accent guardrail still holds. */
+  --foam-400: #8899a8;
+
+  --dt-col: 300px;
+  --dt-gap: 12px;
+  --dt-row: 4px;
+  --dt-media-wide: 169px;
+  --dt-media-square: 300px;
+  --dt-media-portrait: 450px;
+  --dt-media-tall: 660px;
+  --dt-body-h: 152px;
+  --dt-note-lines: 3;
+
+  --dt-mat: var(--depth-900);
+  --dt-mat-line-hover: var(--foam-500);
+  --dt-chip-line: var(--line);
+
+  --dt-working: var(--hold);
+  --dt-failed: var(--sell);
+  --dt-fresh: var(--sonar);
+  --dt-stale: var(--foam-400);
+
+  --dt-cover-ratio: 4 / 3;
+  --dt-cover-gutter: 1px;
+
+  --dt-rail: 400px;
+  --dt-page-max: 1380px;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-app); color: var(--text-body); font-family: var(--font-mono); }
+
+/* ---- Topbar --------------------------------------------------- */
+.dt-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 41px; padding: 0 16px;
+  background: var(--surface-app); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 10;
+}
+.dt-topbar__brand { display: flex; align-items: center; gap: 12px; }
+.dt-topbar__wordmark { font-size: 14px; color: var(--foam-100); }
+.dt-topbar__status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--foam-400); }
+
+/* ---- Page shell ------------------------------------------------ */
+.dt-page { max-width: var(--dt-page-max); margin: 0 auto; padding: 24px 16px 64px; }
+
+/* ---- Section rule: the panel title without the panel ----------- */
+.dt-rule { display: flex; align-items: center; gap: var(--space-6, 12px); margin-bottom: var(--space-6, 12px); }
+.dt-rule__label {
+  color: var(--sonar); font-size: var(--text-sm); letter-spacing: var(--tracking-wide);
+  text-transform: lowercase; white-space: nowrap;
+}
+.dt-rule__label::before { content: '[ '; }
+.dt-rule__label::after { content: ' ]'; }
+.dt-rule__line { flex: 1; height: 1px; background: var(--line); }
+.dt-rule__meta {
+  color: var(--foam-400); font-size: var(--text-2xs); text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+/* ---- Board index: cover mosaic, a contact sheet not a collage -- */
+.dt-boards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--dt-gap);
+}
+.dt-board {
+  display: block; text-decoration: none; color: inherit;
+  border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden;
+  background: var(--surface-card);
+  transition: border-color var(--dur, 0.2s) var(--ease, ease);
+}
+.dt-board:hover { border-color: var(--dt-mat-line-hover); }
+.dt-board__cover {
+  aspect-ratio: var(--dt-cover-ratio); background: var(--dt-mat);
+  display: grid; gap: var(--dt-cover-gutter); background-color: var(--surface-app);
+  border-bottom: 1px solid var(--line);
+}
+.dt-board__cover--empty { display: flex; align-items: center; justify-content: center; color: var(--foam-500); font-size: 11px; }
+.dt-board__cover img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.dt-board__name { padding: 10px 12px; font-size: var(--text-sm); color: var(--foam-100); }
+.dt-board--new {
+  border-style: dashed; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; aspect-ratio: var(--dt-cover-ratio); color: var(--foam-400); background: var(--depth-900);
+  text-decoration: none;
+}
+.dt-board--new:hover { border-color: var(--sonar); color: var(--sonar); }
+.dt-board--new__plus { font-size: 28px; line-height: 1; }
+
+/* ---- Auth page (login) ------------------------------------------ */
+.dt-auth-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--depth-1000); position: relative; overflow: hidden;
+}
+.dt-auth-rings { position: absolute; top: 50%; left: 50%; width: 2px; height: 2px; pointer-events: none; }
+.dt-auth-ring {
+  position: absolute; left: 50%; top: 50%;
+  width: 760px; height: 760px; margin: -380px 0 0 -380px;
+  border: 1px solid var(--sonar); border-radius: 50%;
+  opacity: 0; animation: dtping 7s linear infinite;
+}
+.dt-auth-ring:nth-child(2) { animation-delay: 2.33s; }
+.dt-auth-ring:nth-child(3) { animation-delay: 4.67s; }
+.dt-auth-inner {
+  position: relative; z-index: 1; width: 380px;
+  display: flex; flex-direction: column; align-items: center; gap: 28px; padding: 40px 0;
+}
+.dt-auth-brand { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.dt-auth-headline { font-size: 32px; font-weight: 800; line-height: 1; }
+.dt-auth-sub { font-size: 10px; letter-spacing: 4px; color: var(--foam-500); }
+@keyframes dtping {
+  0% { transform: scale(0.2); opacity: 0; }
+  8% { opacity: 0.45; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+/* ---- Alerts ------------------------------------------------------ */
+.dt-alert { padding: 8px 12px; border-radius: var(--radius-sm); font-size: var(--text-sm); margin-top: 12px; display: block; }
+.dt-alert--danger { background: rgba(255,124,124,0.08); border: 1px solid rgba(255,124,124,0.3); color: var(--sell); }
+
+/* ---- Project detail page ------------------------------------- */
+.dt-project-layout {
+  display: grid;
+  grid-template-columns: var(--dt-rail) 1fr;
+  gap: var(--dt-gap);
+}
+.dt-project-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dt-gap);
+  position: sticky;
+  top: var(--space-6);
+}
+.dt-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--dt-gap);
+}
+.dt-item {
+  border: 1px solid var(--line);
+  background: var(--surface-card);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.dt-item:hover { border-color: var(--dt-mat-line-hover); }
+.dt-item__media {
+  aspect-ratio: 4/3;
+  background: var(--dt-mat);
+  overflow: hidden;
+}
+.dt-item__media img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+.dt-item__body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dt-item__title { color: var(--foam-100); }
+.dt-item__tag {
+  text-transform: uppercase;
+  color: var(--foam-400);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+}
+.dt-item__note {
+  color: var(--foam-200);
+  -webkit-line-clamp: var(--dt-note-lines);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dt-swatches { display: flex; flex-wrap: wrap; gap: 4px; }
+.dt-swatch {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.dt-bullet { color: var(--foam-200); font-size: var(--text-sm); margin: 0 0 8px; }
+.dt-decisions,
+.dt-questions {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--foam-200);
+  font-size: var(--text-sm);
+  padding: 0;
+  margin: 0;
+}
+.dt-decisions__label { color: var(--foam-100); }
+.dt-empty { color: var(--foam-500); font-style: italic; font-size: var(--text-sm); }
+
+@media (max-width: 1024px) {
+  .dt-project-layout { grid-template-columns: 1fr; }
+  .dt-project-rail { position: static; }
+}
+
+/* ---- Utilities ----------------------------------------------- */
+.w-100 { width: 100%; }
+.d-none { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .dt-auth-ring { animation: none; opacity: 0.15; }
+}

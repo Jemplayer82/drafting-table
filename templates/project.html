@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — drafting table{% endblock %}
+{% block content %}
+<div class="dt-page">
+
+  <div class="dt-rule">
+    <span class="dt-rule__label">{{ project.name|lower }}</span>
+    <span class="dt-rule__line"></span>
+    <span class="dt-rule__meta">{{ items|length }} ITEM{{ 'S' if items|length != 1 else '' }}</span>
+  </div>
+
+  <div class="dt-project-layout">
+    <div class="dt-project-rail">
+      <div class="fc-panel">
+        <span class="fc-panel__title">ideas &amp; direction</span>
+        {% if direction_lines %}
+          {% for line in direction_lines %}<p class="dt-bullet">{{ line }}</p>{% endfor %}
+        {% else %}
+          <p class="dt-empty">no synthesis yet.</p>
+        {% endif %}
+      </div>
+      <div class="fc-panel">
+        <span class="fc-panel__title">decisions log</span>
+        {% if decisions %}
+        <ul class="dt-decisions">
+          {% for d in decisions %}
+          <li class="dt-decisions__item">{% if d.label %}<strong class="dt-decisions__label">{{ d.label }}</strong>{% endif %} {{ d.body_md }}</li>
+          {% endfor %}
+        </ul>
+        {% else %}
+          <p class="dt-empty">no decisions logged yet.</p>
+        {% endif %}
+      </div>
+      <div class="fc-panel">
+        <span class="fc-panel__title">open questions</span>
+        {% if questions %}
+        <ul class="dt-questions">
+          {% for q in questions %}<li>{{ q.question }}</li>{% endfor %}
+        </ul>
+        {% else %}
+          <p class="dt-empty">no open questions.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="dt-items">
+      {% for item in items %}
+      <div class="dt-item">
+        {% if item.thumb_media_id %}
+        <div class="dt-item__media">
+          <img src="/media/{{ item.thumb_media_id }}" alt="{{ item.alt_text or '' }}" loading="lazy">
+        </div>
+        {% endif %}
+        <div class="dt-item__body">
+          <div class="dt-item__title">{{ item.title or 'untitled' }}</div>
+          {% if item.tag %}<div class="dt-item__tag">{{ item.tag }}</div>{% endif %}
+          {% if item.note_md %}<p class="dt-item__note">{{ item.note_md }}</p>{% endif %}
+          {% if item.swatches %}
+          <div class="dt-swatches">
+            {% for sw in item.swatches %}
+            <span class="dt-swatch" data-sw="{{ item.id }}-{{ loop.index0 }}" title="{{ sw.label or sw.hex }}"></span>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <style nonce="{{ nonce }}">
+    {% for item in items %}{% for sw in item.swatches %}[data-sw="{{ item.id }}-{{ loop.index0 }}"] { background-color: {{ sw.hex }}; }
+    {% endfor %}{% endfor %}
+  </style>
+</div>
+{% endblock %}

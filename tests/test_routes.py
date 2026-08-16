@@ -133,3 +133,38 @@ def test_media_serves_seeded_thumbnail(logged_in_client):
     assert "filename=" in resp.headers["Content-Disposition"]
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
+
+
+def test_project_page_requires_auth(client):
+    resp = client.get("/p/jemplayer82-web-design-ideas", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["Location"] == "/login"
+
+
+def test_project_page_404s_for_unknown_slug(logged_in_client):
+    resp = logged_in_client.get("/p/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_project_page_renders_all_18_real_items(logged_in_client):
+    resp = logged_in_client.get("/p/jemplayer82-web-design-ideas")
+    assert resp.status_code == 200
+    assert b"MNTN" in resp.data
+    assert b"layout + type" in resp.data
+    assert b"/media/" in resp.data
+    assert b"open questions" in resp.data
+
+
+def test_project_page_renders_swatches_and_synthesis(logged_in_client):
+    resp = logged_in_client.get("/p/jemplayer82-web-design-ideas")
+    assert resp.status_code == 200
+    assert b"#D5891B" in resp.data
+    assert b"palette-hunting" in resp.data
+    assert b"Which single accent color" in resp.data
+    assert b"no decisions logged yet." in resp.data
+
+
+def test_project_page_example_project_renders_decisions(logged_in_client):
+    resp = logged_in_client.get("/p/studio-portfolio-site")
+    assert resp.status_code == 200
+    assert b"Type" in resp.data
