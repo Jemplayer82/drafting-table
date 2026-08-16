@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}boards — drafting table{% endblock %}
+{% block content %}
+<div class="dt-page">
+
+  <div class="dt-rule">
+    <span class="dt-rule__label">boards</span>
+    <span class="dt-rule__line"></span>
+    <span class="dt-rule__meta">{{ projects|length }} BOARD{{ 'S' if projects|length != 1 else '' }}</span>
+  </div>
+
+  <div class="dt-boards">
+    <a class="dt-board dt-board--new" href="#" data-action="new-project">
+      <span class="dt-board--new__plus">+</span>
+      <span>new project</span>
+    </a>
+
+    {% for p in projects %}
+    <a class="dt-board" href="/p/{{ p.slug }}">
+      {% if covers.get(p.id) %}
+      <div class="dt-board__cover">
+        <img src="/media/{{ covers[p.id] }}" alt="" loading="lazy">
+      </div>
+      {% else %}
+      <div class="dt-board__cover dt-board__cover--empty" data-n="0"></div>
+      {% endif %}
+      <div class="dt-board__name">{{ p.name }}</div>
+    </a>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}

@@ -173,7 +173,16 @@ def board():  # noqa: ANN201
         projects = conn.execute(
             "SELECT id, name, slug FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC"
         ).fetchall()
-    return render_template("board.html", projects=projects, nonce=g.csp_nonce)
+        covers = {}
+        for p in projects:
+            cover = conn.execute(
+                "SELECT thumb_media_id FROM items WHERE project_id = ? "
+                "AND thumb_media_id IS NOT NULL ORDER BY position, id LIMIT 1",
+                (p["id"],),
+            ).fetchone()
+            if cover:
+                covers[p["id"]] = cover["thumb_media_id"]
+    return render_template("board.html", projects=projects, covers=covers, nonce=g.csp_nonce)
 
 
 @app.route("/media/<mid>")

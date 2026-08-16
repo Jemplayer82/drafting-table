@@ -57,6 +57,13 @@ def test_board_page_shows_both_seeded_projects(logged_in_client):
     assert b"jemplayer82" in resp.data
 
 
+def test_board_shows_real_cover_for_project_with_images(logged_in_client):
+    resp = logged_in_client.get("/")
+    assert resp.status_code == 200
+    assert b"/media/" in resp.data
+    assert b"dt-board__cover--empty" in resp.data
+
+
 def test_logout_without_csrf_token_is_rejected(logged_in_client):
     resp = logged_in_client.post("/logout")
     assert resp.status_code == 403
