@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from typing import Any
 
-from flask import Flask, g, redirect, render_template, request, url_for
+from flask import Flask, Response, g, redirect, render_template, request, url_for
 
 import auth
 import db
@@ -44,6 +45,8 @@ seed.run_seed_if_empty()
 app = Flask(__name__)
 
 _PUBLIC_PATHS = {"/login", "/healthz"}
+_MEDIA_ID_RE = re.compile(r"[0-9a-f]{32}")
+_MEDIA_EXT_BY_MIME = {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png"}
 
 
 def _is_public(path: str) -> bool:
@@ -89,16 +92,19 @@ def _auth_gate() -> Any:
 @app.after_request
 def _security_headers(response):  # noqa: ANN001, ANN201
     nonce = getattr(g, "csp_nonce", "")
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; "
-        "img-src 'self' data:; "
-        f"style-src 'self' 'nonce-{nonce}'; style-src-attr 'none'; "
-        f"script-src 'self' 'nonce-{nonce}'; "
-        "connect-src 'self'; "
-        "form-action 'self'; "
-        "frame-ancestors 'none'; "
-        "base-uri 'none'"
-    )
+    if request.path.startswith("/media/"):
+        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    else:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            "img-src 'self' data:; "
+            f"style-src 'self' 'nonce-{nonce}'; style-src-attr 'none'; "
+            f"script-src 'self' 'nonce-{nonce}'; "
+            "connect-src 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'"
+        )
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -166,6 +172,23 @@ def board():  # noqa: ANN201
             "SELECT id, name, slug FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC"
         ).fetchall()
     return render_template("board.html", projects=projects, nonce=g.csp_nonce)
+
+
+@app.route("/media/<mid>")
+def media(mid):  # noqa: ANN201
+    if not _MEDIA_ID_RE.fullmatch(mid):
+        return "", 404
+    with db.connect() as conn:
+        row = conn.execute("SELECT path, mime FROM media WHERE id = ?", (mid,)).fetchone()
+    if row is None:
+        return "", 404
+    media_path = db.MEDIA_DIR / row["path"]
+    if not media_path.is_file():
+        return "", 404
+    ext = _MEDIA_EXT_BY_MIME.get(row["mime"], "bin")
+    resp = Response(media_path.read_bytes(), mimetype=row["mime"])
+    resp.headers["Content-Disposition"] = f'inline; filename="media.{ext}"'
+    return resp
 
 
 if __name__ == "__main__":

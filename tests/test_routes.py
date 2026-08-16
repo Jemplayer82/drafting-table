@@ -96,3 +96,40 @@ def test_lockout_after_repeated_failures(client):
         },
     )
     assert b"Too many attempts" in resp.data
+
+
+def test_media_requires_auth(client):
+    resp = client.get("/media/" + "0" * 32)
+    assert resp.status_code == 401
+
+
+def test_media_rejects_non_hex_id(logged_in_client):
+    resp = logged_in_client.get("/media/" + "z" * 32)
+    assert resp.status_code == 404
+
+
+def test_media_rejects_wrong_length_id(logged_in_client):
+    resp = logged_in_client.get("/media/deadbeef")
+    assert resp.status_code == 404
+
+
+def test_media_rejects_traversal_id(logged_in_client):
+    resp = logged_in_client.get("/media/%2e%2e%2f%2e%2e%2fetc%2fpasswd")
+    assert resp.status_code == 404
+
+
+def test_media_serves_seeded_thumbnail(logged_in_client):
+    import db
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT thumb_media_id FROM items WHERE thumb_media_id IS NOT NULL LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    resp = logged_in_client.get(f"/media/{row['thumb_media_id']}")
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("image/webp")
+    assert "inline" in resp.headers["Content-Disposition"]
+    assert "filename=" in resp.headers["Content-Disposition"]
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
