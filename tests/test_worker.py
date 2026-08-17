@@ -832,3 +832,45 @@ def test_run_ingest_job_url_kind_connection_error_fails_generic_and_does_not_cha
             (project_id,),
         ).fetchone()
         assert chained["c"] == 0
+
+
+def test_run_ingest_job_fails_when_note_item_deleted_mid_flight():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("mid-delete", "")
+        raw = "a note that gets deleted"
+        item_id = _insert_item(conn, project_id=project_id, raw_text=raw)
+        job_id = _insert_job(
+            conn, kind="ingest", project_id=project_id, item_id=item_id
+        )
+        job = db.claim_next_job("worker-x")
+
+        deleted = []
+
+        def delete_on_first_sleep(*_):
+            if not deleted:
+                with db.connect() as c:
+                    c.execute("DELETE FROM items WHERE id = ?", (item_id,))
+                    c.commit()
+                deleted.append(True)
+
+        worker.run_ingest_job(job, sleep=delete_on_first_sleep)
+
+        job_row = conn.execute(
+            "SELECT status, finished_at, error FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        assert job_row["status"] == "failed"
+        assert (
+            job_row["error"]
+            == f"item {item_id} was deleted before ingest completed"
+        )
+        assert job_row["finished_at"] is not None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0

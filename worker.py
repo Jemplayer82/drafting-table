@@ -161,6 +161,13 @@ def _run_url_ingest(job, item, *, sleep) -> None:
     db.set_job_phase(job["id"], "persist")
     sleep(PHASE_SLEEP_SECONDS)
 
+    item = db.get_item(job["item_id"])
+    if item is None:
+        db.fail_job(
+            job["id"], job["item_id"], f"item {job['item_id']} was deleted before ingest completed"
+        )
+        return
+
     db.complete_ingest_job(job["id"], job["item_id"], title, **media_fields)
     db.chain_resynthesize_job(job["project_id"])
 
@@ -185,6 +192,14 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
         db.set_job_phase(job["id"], phase)
         sleep(PHASE_SLEEP_SECONDS)
     title = _stub_title(item)
+
+    item = db.get_item(job["item_id"])
+    if item is None:
+        db.fail_job(
+            job["id"], job["item_id"], f"item {job['item_id']} was deleted before ingest completed"
+        )
+        return
+
     db.complete_ingest_job(job["id"], job["item_id"], title)
     db.chain_resynthesize_job(job["project_id"])
 
