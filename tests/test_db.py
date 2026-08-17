@@ -621,6 +621,88 @@ def test_complete_ingest_job_marks_item_ready_and_job_done(app_env):
     assert job["heartbeat_at"] is not None
 
 
+def test_complete_ingest_job_sets_media_fields_when_provided(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest Media", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.complete_ingest_job(
+        job_id,
+        item_id,
+        "Media Title",
+        media_id="full123",
+        thumb_media_id="thumb456",
+        thumb_w=800,
+        thumb_h=600,
+    )
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "Media Title"
+    assert item["media_id"] == "full123"
+    assert item["thumb_media_id"] == "thumb456"
+    assert item["thumb_w"] == 800
+    assert item["thumb_h"] == 600
+
+
+def test_complete_ingest_job_leaves_media_fields_null_by_default(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest No Media", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.complete_ingest_job(job_id, item_id, "Plain Title")
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "Plain Title"
+    assert item["media_id"] is None
+    assert item["thumb_media_id"] is None
+    assert item["thumb_w"] is None
+    assert item["thumb_h"] is None
+
+
+def test_complete_ingest_job_writes_tag_and_note_md_when_provided(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest Tag Note", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(conn, pid, db, kind="ingest", status="running", item_id=item_id)
+
+    db.complete_ingest_job(
+        job_id,
+        item_id,
+        "A Title",
+        tag="moody-teal",
+        note_md="Some analysis prose.",
+    )
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "A Title"
+    assert item["tag"] == "moody-teal"
+    assert item["note_md"] == "Some analysis prose."
+
+
 def test_complete_job_marks_job_done_without_touching_items_or_syntheses(app_env):
     import db
 
@@ -1012,59 +1094,3 @@ def test_insert_media_inserts_row_matching_given_fields(app_env):
     assert row["height"] == 900
     assert row["byte_size"] == 45678
     assert row["created_at"] is not None
-
-
-def test_complete_ingest_job_sets_media_fields_when_provided(app_env):
-    import db
-
-    importlib.reload(db)
-    db.init_db()
-    pid, _ = db.create_project("Complete Ingest Media", None)
-    with db.connect() as conn:
-        item_id = _insert_item(conn, pid, db, position=0)
-        job_id = _insert_job(
-            conn, pid, db, kind="ingest", status="running", item_id=item_id
-        )
-
-    db.complete_ingest_job(
-        job_id,
-        item_id,
-        "Media Title",
-        media_id="full123",
-        thumb_media_id="thumb456",
-        thumb_w=800,
-        thumb_h=600,
-    )
-
-    with db.connect() as conn:
-        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
-    assert item["status"] == "ready"
-    assert item["title"] == "Media Title"
-    assert item["media_id"] == "full123"
-    assert item["thumb_media_id"] == "thumb456"
-    assert item["thumb_w"] == 800
-    assert item["thumb_h"] == 600
-
-
-def test_complete_ingest_job_leaves_media_fields_null_by_default(app_env):
-    import db
-
-    importlib.reload(db)
-    db.init_db()
-    pid, _ = db.create_project("Complete Ingest No Media", None)
-    with db.connect() as conn:
-        item_id = _insert_item(conn, pid, db, position=0)
-        job_id = _insert_job(
-            conn, pid, db, kind="ingest", status="running", item_id=item_id
-        )
-
-    db.complete_ingest_job(job_id, item_id, "Plain Title")
-
-    with db.connect() as conn:
-        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
-    assert item["status"] == "ready"
-    assert item["title"] == "Plain Title"
-    assert item["media_id"] is None
-    assert item["thumb_media_id"] is None
-    assert item["thumb_w"] is None
-    assert item["thumb_h"] is None

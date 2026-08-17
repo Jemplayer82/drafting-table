@@ -476,24 +476,29 @@ def complete_ingest_job(
     item_id: int,
     title: str,
     *,
+    tag: str | None = None,
+    note_md: str | None = None,
     media_id: str | None = None,
     thumb_media_id: str | None = None,
     thumb_w: int | None = None,
     thumb_h: int | None = None,
 ) -> None:
-    """Marks an ingest item as ready with its extracted title (and, for url items
-    with a fetched og:image, its media fields) and the ingest job as done. All four
-    media fields default to None -- the existing 3-positional-arg call shape is
-    unaffected and continues to null out those columns exactly as before. Both
-    updates share one timestamp and run in one transaction."""
+    """Marks an ingest item as ready with its extracted title and optional
+    analyze_item()-derived tag and note_md, plus (for url items with a fetched
+    og:image) its media fields. tag, note_md, and all four media fields default
+    to None -- the existing 3-positional-arg call shape is unaffected and
+    continues to leave those columns NULL exactly as before. Keeping
+    title+tag+note_md+media fields in one atomic UPDATE avoids a second
+    update_item round-trip. Both updates share one timestamp and run in one
+    transaction."""
     now = _now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
-                "UPDATE items SET status='ready', title=?, media_id=?, thumb_media_id=?, "
-                "thumb_w=?, thumb_h=?, updated_at=? WHERE id=?",
-                (title, media_id, thumb_media_id, thumb_w, thumb_h, now, item_id),
+                "UPDATE items SET status='ready', title=?, tag=?, note_md=?, media_id=?, "
+                "thumb_media_id=?, thumb_w=?, thumb_h=?, updated_at=? WHERE id=?",
+                (title, tag, note_md, media_id, thumb_media_id, thumb_w, thumb_h, now, item_id),
             )
             conn.execute(
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=? WHERE id=?",
