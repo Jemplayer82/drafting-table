@@ -204,12 +204,11 @@ def test_run_ingest_job_chains_exactly_one_resynthesize_job():
 def test_run_resynthesize_job_marks_done_and_never_touches_syntheses():
     with db.connect() as conn:
         project_id, _ = db.create_project("resynth", "")
-        item_id = _insert_item(conn, project_id=project_id, raw_text="note")
         job_id = _insert_job(
             conn,
             kind="resynthesize",
             project_id=project_id,
-            item_id=item_id,
+            item_id=None,
             status="queued",
         )
         job = db.claim_next_job("worker-x")
