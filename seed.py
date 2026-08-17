@@ -4,6 +4,8 @@ import base64
 import json
 import re
 import secrets
+import sqlite3
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -108,23 +110,45 @@ def parse_source(html_path: Path = SEED_HTML_PATH) -> list[dict]:
 
 
 def run_seed_if_empty(html_path: Path = SEED_HTML_PATH) -> None:
+    # Fast path: nothing to do if the database is already seeded.
     with db.connect() as conn:
         n = conn.execute("SELECT COUNT(*) AS n FROM projects").fetchone()["n"]
         if n:
             return
+
     if not html_path.exists():
         return
 
     projects = parse_source(html_path)
-    with db.connect() as conn:
-        conn.execute("BEGIN")
-        try:
-            for proj in projects:
-                _insert_project(conn, proj)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+
+    # Serialize the check-then-act with an IMMEDIATE transaction.  Only one
+    # worker will see an empty projects table and perform the inserts.  Others
+    # either block while the winner seeds, then find the table populated, or
+    # (if SQLite's busy timeout expires while the winner still holds the lock)
+    # retry until the winner finishes.
+    while True:
+        with db.connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "database is locked" in str(exc).lower():
+                    time.sleep(0.2)
+                    continue
+                raise
+
+            n = conn.execute("SELECT COUNT(*) AS n FROM projects").fetchone()["n"]
+            if n:
+                conn.execute("ROLLBACK")
+                return
+
+            try:
+                for proj in projects:
+                    _insert_project(conn, proj)
+                conn.execute("COMMIT")
+                return
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
 
 def _insert_project(conn, proj: dict) -> None:
