@@ -104,7 +104,7 @@ def test_item_edit_updates_title_tag_note_and_persists_on_reload(logged_in_clien
             ("jemplayer82-web-design-ideas",),
         ).fetchone()
         swatches = conn.execute(
-            "SELECT hex, label FROM swatches "
+            "SELECT hex, label, position FROM swatches "
             "WHERE item_id = ? ORDER BY position",
             (item["id"],),
         ).fetchall()
@@ -148,6 +148,14 @@ def test_item_edit_updates_title_tag_note_and_persists_on_reload(logged_in_clien
     assert row["title"] == new_title
     assert row["tag"] == new_tag
     assert row["note_md"] == new_note
+
+    with db.connect() as conn:
+        after_swatches = conn.execute(
+            "SELECT hex, label, position FROM swatches "
+            "WHERE item_id = ? ORDER BY position",
+            (item_id,),
+        ).fetchall()
+    assert [dict(r) for r in after_swatches] == [dict(r) for r in swatches]
 
 
 def test_item_edit_rejects_invalid_swatch_hex_and_leaves_existing_swatches_untouched(
