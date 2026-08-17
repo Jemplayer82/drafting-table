@@ -32,12 +32,32 @@
         {% if decisions %}
         <ul class="dt-decisions">
           {% for d in decisions %}
-          <li class="dt-decisions__item">{% if d.label %}<strong class="dt-decisions__label">{{ d.label }}</strong>{% endif %} {{ d.body_md }}</li>
+          <li class="dt-decisions__item" id="decision-{{ d.id }}">
+            {% if d.label %}<strong class="dt-decisions__label">{{ d.label }}</strong>{% endif %} {{ d.body_md }}
+            <button type="button" class="fc-btn fc-btn--ghost fc-btn--sm" data-toggle="decision-edit-{{ d.id }}">edit</button>
+            <div class="dt-decisions__edit d-none" id="decision-edit-{{ d.id }}">
+              <form method="post" action="/api/projects/{{ project.id }}/decisions/{{ d.id }}/edit">
+                <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+                <textarea class="fc-input" name="body_md" rows="2">{{ d.body_md }}</textarea>
+                <textarea class="fc-input" name="rationale_md" rows="2">{{ d.rationale_md or '' }}</textarea>
+                <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">save</button>
+              </form>
+            </div>
+          </li>
           {% endfor %}
         </ul>
         {% else %}
           <p class="dt-empty">no decisions logged yet.</p>
         {% endif %}
+        {% if decision_error %}
+        <div class="dt-alert dt-alert--danger">! {{ decision_error }}</div>
+        {% endif %}
+        <form method="post" action="/api/projects/{{ project.id }}/decisions" class="dt-decisions__new">
+          <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+          <textarea class="fc-input" name="body_md" rows="2" placeholder="Decision" required></textarea>
+          <textarea class="fc-input" name="rationale_md" rows="2" placeholder="Rationale (optional)"></textarea>
+          <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">add decision</button>
+        </form>
       </div>
       <div class="fc-panel">
         <span class="fc-panel__title">open questions</span>

@@ -206,6 +206,8 @@ body { margin: 0; background: var(--surface-app); color: var(--text-body); font-
   margin: 0;
 }
 .dt-decisions__label { color: var(--foam-100); }
+.dt-decisions__edit { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.dt-decisions__new { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .dt-empty { color: var(--foam-500); font-style: italic; font-size: var(--text-sm); }
 
 @media (max-width: 1024px) {

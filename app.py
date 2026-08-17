@@ -239,6 +239,43 @@ def media(mid):  # noqa: ANN001, ANN201
     return resp
 
 
+def _project_or_404(project_id: int):
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT id, slug FROM projects WHERE id = ? AND archived_at IS NULL", (project_id,)
+        ).fetchone()
+
+
+@app.route("/api/projects/<int:project_id>/decisions", methods=["POST"])
+def decision_create(project_id):
+    proj = _project_or_404(project_id)
+    if proj is None:
+        return "", 404
+    slug = proj["slug"]
+    body_md = request.form.get("body_md", "").strip()
+    rationale_md = request.form.get("rationale_md", "").strip() or None
+    if not body_md:
+        return _render_project(slug, decision_error="Decision text is required.")
+    db.insert_decision(project_id, body_md, rationale_md)
+    return redirect(f"/p/{slug}")
+
+
+@app.route("/api/projects/<int:project_id>/decisions/<int:decision_id>/edit", methods=["POST"])
+def decision_edit(project_id, decision_id):
+    proj = _project_or_404(project_id)
+    if proj is None:
+        return "", 404
+    slug = proj["slug"]
+    body_md = request.form.get("body_md", "").strip()
+    rationale_md = request.form.get("rationale_md", "").strip() or None
+    if not body_md:
+        return _render_project(slug, decision_error="Decision text is required.")
+    new_id = db.supersede_decision(decision_id, project_id, body_md, rationale_md)
+    if new_id is None:
+        return "", 404
+    return redirect(f"/p/{slug}")
+
+
 def _render_project(
     slug: str,
     *,
@@ -279,8 +316,9 @@ def _render_project(
             (proj["id"],),
         ).fetchone()
         decision_rows = conn.execute(
-            "SELECT body_md, rationale_md FROM decisions "
-            "WHERE project_id = ? AND status = 'accepted' ORDER BY created_at",
+            "SELECT id, body_md, rationale_md FROM decisions "
+            "WHERE project_id = ? AND status = 'accepted' AND superseded_by IS NULL "
+            "ORDER BY created_at",
             (proj["id"],),
         ).fetchall()
 
@@ -311,7 +349,10 @@ def _render_project(
     decisions_view = []
     for row in decision_rows:
         label = row["rationale_md"].strip("*") if row["rationale_md"] else None
-        decisions_view.append({"label": label, "body_md": row["body_md"]})
+        decisions_view.append({
+            "id": row["id"], "label": label, "body_md": row["body_md"],
+            "rationale_md": row["rationale_md"],
+        })
 
     return render_template(
         "project.html", project=proj, items=view_items, synthesis=synthesis,
