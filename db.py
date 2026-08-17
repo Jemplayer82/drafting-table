@@ -366,6 +366,22 @@ def replace_swatches(item_id: int, swatches: list[dict]) -> None:
             raise
 
 
+def insert_media(
+    media_id: str, path: str, mime: str, width: int, height: int, byte_size: int
+) -> None:
+    """Inserts a media row for a file that has already been written to disk at
+    db.MEDIA_DIR / path. Single-statement write under this file's normal
+    autocommit connect() -- no explicit BEGIN IMMEDIATE needed, matching the shape
+    of this file's other single-statement inserts. Caller has already generated
+    media_id via secrets.token_hex(16) and written the bytes to disk."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO media (id, path, mime, width, height, byte_size, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (media_id, path, mime, width, height, byte_size, _now()),
+        )
+
+
 def insert_decision(project_id: int, body_md: str, rationale_md: str | None) -> int:
     """Inserts a new decisions row: source='user', status='accepted', decided_at=now.
     superseded_by and job_id are left NULL (both nullable, no DEFAULT needed).
@@ -455,16 +471,29 @@ def set_job_phase(job_id: int, phase: str) -> None:
         )
 
 
-def complete_ingest_job(job_id: int, item_id: int, title: str) -> None:
-    """Marks an ingest item as ready with its extracted title and the ingest job as done.
-    Both updates share one timestamp and run in one transaction."""
+def complete_ingest_job(
+    job_id: int,
+    item_id: int,
+    title: str,
+    *,
+    media_id: str | None = None,
+    thumb_media_id: str | None = None,
+    thumb_w: int | None = None,
+    thumb_h: int | None = None,
+) -> None:
+    """Marks an ingest item as ready with its extracted title (and, for url items
+    with a fetched og:image, its media fields) and the ingest job as done. All four
+    media fields default to None -- the existing 3-positional-arg call shape is
+    unaffected and continues to null out those columns exactly as before. Both
+    updates share one timestamp and run in one transaction."""
     now = _now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
-                "UPDATE items SET status='ready', title=?, updated_at=? WHERE id=?",
-                (title, now, item_id),
+                "UPDATE items SET status='ready', title=?, media_id=?, thumb_media_id=?, "
+                "thumb_w=?, thumb_h=?, updated_at=? WHERE id=?",
+                (title, media_id, thumb_media_id, thumb_w, thumb_h, now, item_id),
             )
             conn.execute(
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=? WHERE id=?",
@@ -560,30 +589,43 @@ def get_item(item_id: int) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
 
 
-def create_note_and_ingest_job(project_id: int, raw_text: str) -> tuple[int, int]:
-    """Creates a new 'note' item in pending status and a queued 'ingest' job for it,
-    all in one transaction. The item is appended at the next position in the project.
-    Returns (item_id, job_id)."""
+def _create_item_and_ingest_job(
+    project_id: int, kind: str, **item_fields: object
+) -> tuple[int, int]:
+    """Shared by create_note_and_ingest_job/create_url_and_ingest_job: inserts a new
+    item of the given kind in pending status plus a queued ingest job for it, all in
+    one transaction. item_fields values are inserted as literal columns matching
+    their key names -- every key must already be in ITEM_WRITABLE (mirrors
+    update_item's own guard; both current call sites below pass a single fixed,
+    hardcoded field name, so this can never be reached with an untrusted column
+    name, but the check costs nothing and matches this file's defense-in-depth
+    convention). The item is appended at the next position in the project. Returns
+    (item_id, job_id)."""
+    bad = set(item_fields) - ITEM_WRITABLE
+    if bad:
+        raise ValueError(f"not writable: {bad}")
     now = _now()
+    columns = ", ".join(item_fields.keys())
+    placeholders = ", ".join("?" for _ in item_fields)
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             pos_row = conn.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos "
-                "FROM items WHERE project_id=?",
+                "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM items WHERE project_id=?",
                 (project_id,),
             ).fetchone()
             position = pos_row["next_pos"]
+            insert_sql = (
+                f"INSERT INTO items "
+                f"(project_id, kind, status, {columns}, position, created_at, updated_at) "
+                f"VALUES (?, ?, 'pending', {placeholders}, ?, ?, ?)"
+            )
             cur = conn.execute(
-                "INSERT INTO items "
-                "(project_id, kind, status, raw_text, position, created_at, updated_at) "
-                "VALUES (?, 'note', 'pending', ?, ?, ?, ?)",
-                (project_id, raw_text, position, now, now),
+                insert_sql, (project_id, kind, *item_fields.values(), position, now, now)
             )
             item_id = cur.lastrowid
             cur = conn.execute(
-                "INSERT INTO jobs "
-                "(project_id, item_id, kind, status, created_at) "
+                "INSERT INTO jobs (project_id, item_id, kind, status, created_at) "
                 "VALUES (?, ?, 'ingest', 'queued', ?)",
                 (project_id, item_id, now),
             )
@@ -593,6 +635,14 @@ def create_note_and_ingest_job(project_id: int, raw_text: str) -> tuple[int, int
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+
+def create_note_and_ingest_job(project_id: int, raw_text: str) -> tuple[int, int]:
+    return _create_item_and_ingest_job(project_id, "note", raw_text=raw_text)
+
+
+def create_url_and_ingest_job(project_id: int, source_url: str) -> tuple[int, int]:
+    return _create_item_and_ingest_job(project_id, "url", source_url=source_url)
 
 
 def list_active_jobs(project_id: int) -> list[sqlite3.Row]:

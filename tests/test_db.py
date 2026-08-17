@@ -847,6 +847,45 @@ def test_create_note_and_ingest_job_position_zero_when_project_has_no_items(app_
     assert item["position"] == 0
 
 
+def test_create_url_and_ingest_job_creates_url_kind_item_with_source_url(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("URL Drop", None)
+
+    item_id, job_id = db.create_url_and_ingest_job(pid, "https://example.com/page")
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert item["project_id"] == pid
+    assert item["kind"] == "url"
+    assert item["status"] == "pending"
+    assert item["source_url"] == "https://example.com/page"
+    assert item["raw_text"] is None
+    assert job["project_id"] == pid
+    assert job["item_id"] == item_id
+    assert job["kind"] == "ingest"
+    assert job["status"] == "queued"
+
+
+def test_create_url_and_ingest_job_position_zero_when_project_has_no_items(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("URL Zero", None)
+
+    item_id, job_id = db.create_url_and_ingest_job(pid, "https://example.com/first")
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT position FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+    assert item["position"] == 0
+
+
 def test_list_active_jobs_only_returns_queued_and_running_for_the_given_project(app_env):
     import db
 
@@ -946,3 +985,86 @@ def test_live_jobs_by_item_maps_item_to_its_live_job_and_excludes_jobs_with_null
     assert set(mapping.keys()) == {item_a}
     assert mapping[item_a]["id"] == running_a
     assert mapping[item_a]["status"] == "running"
+
+
+def test_insert_media_inserts_row_matching_given_fields(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+
+    db.insert_media(
+        media_id="aabbccdd11223344",
+        path="2024/01/image.jpg",
+        mime="image/jpeg",
+        width=1200,
+        height=900,
+        byte_size=45678,
+    )
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM media WHERE id = ?", ("aabbccdd11223344",)
+        ).fetchone()
+    assert row["path"] == "2024/01/image.jpg"
+    assert row["mime"] == "image/jpeg"
+    assert row["width"] == 1200
+    assert row["height"] == 900
+    assert row["byte_size"] == 45678
+    assert row["created_at"] is not None
+
+
+def test_complete_ingest_job_sets_media_fields_when_provided(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest Media", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.complete_ingest_job(
+        job_id,
+        item_id,
+        "Media Title",
+        media_id="full123",
+        thumb_media_id="thumb456",
+        thumb_w=800,
+        thumb_h=600,
+    )
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "Media Title"
+    assert item["media_id"] == "full123"
+    assert item["thumb_media_id"] == "thumb456"
+    assert item["thumb_w"] == 800
+    assert item["thumb_h"] == 600
+
+
+def test_complete_ingest_job_leaves_media_fields_null_by_default(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest No Media", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.complete_ingest_job(job_id, item_id, "Plain Title")
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "Plain Title"
+    assert item["media_id"] is None
+    assert item["thumb_media_id"] is None
+    assert item["thumb_w"] is None
+    assert item["thumb_h"] is None
