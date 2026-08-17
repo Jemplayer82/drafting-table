@@ -171,6 +171,50 @@ def test_project_page_renders_swatches_and_synthesis(logged_in_client):
     assert b"no decisions logged yet." in resp.data
 
 
+def test_project_page_swatches_use_nonce_style_block_not_inline_styles(logged_in_client):
+    resp = logged_in_client.get("/p/jemplayer82-web-design-ideas")
+    assert resp.status_code == 200
+
+    # The CSP header must authorize the style block's nonce.
+    csp = resp.headers["Content-Security-Policy"]
+    csp_nonce_match = re.search(r"style-src [^;]*'nonce-([^']+)'", csp)
+    assert csp_nonce_match, "expected a nonce in the CSP style-src directive"
+    expected_nonce = csp_nonce_match.group(1)
+
+    # Find the nonce'd <style> block and the rule that paints the known swatch.
+    style_match = re.search(
+        rb'<style nonce="([^"]+)">\s*(.*?)\s*</style>',
+        resp.data,
+        re.DOTALL,
+    )
+    assert style_match, "expected a nonce'd <style> block"
+    style_nonce = style_match.group(1).decode()
+    style_block = style_match.group(2)
+    assert style_nonce == expected_nonce, "style block nonce must match CSP header nonce"
+
+    rule_match = re.search(
+        rb'\[data-sw="([^"]+)"\]\s*\{\s*background-color:\s*#D5891B\s*;?\s*\}',
+        style_block,
+    )
+    assert rule_match, "expected a CSS rule setting #D5891B via a data-sw selector"
+    data_sw_value = rule_match.group(1).decode()
+
+    # The matching span must carry the same data-sw attribute.
+    span_re = re.compile(rb'<span[^>]*class="dt-swatch"[^>]*>', re.IGNORECASE)
+    swatch_spans = list(span_re.finditer(resp.data))
+    assert any(
+        f'data-sw="{data_sw_value}"'.encode() in span.group(0)
+        for span in swatch_spans
+    ), "expected a dt-swatch span with the matching data-sw attribute"
+
+    # Positively rule out the old inline-style bug.
+    for span in swatch_spans:
+        tag = span.group(0).lower()
+        assert not (
+            b"style=" in tag and b"background-color" in tag
+        ), "dt-swatch spans must not use inline style for background-color"
+
+
 def test_project_page_example_project_renders_decisions(logged_in_client):
     resp = logged_in_client.get("/p/studio-portfolio-site")
     assert resp.status_code == 200
