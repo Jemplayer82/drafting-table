@@ -86,7 +86,25 @@ def test_logout_with_csrf_token_succeeds_and_revokes_session(logged_in_client):
 
 def test_security_headers_present(client):
     resp = client.get("/login")
-    assert "default-src 'none'" in resp.headers["Content-Security-Policy"]
+    csp = resp.headers["Content-Security-Policy"]
+    assert "default-src 'none'" in csp
+
+    nonce_match = re.search(r"style-src [^;]*'nonce-([^']+)'", csp)
+    assert nonce_match, "expected a nonce in the CSP style-src directive"
+    nonce = nonce_match.group(1)
+
+    expected_csp = (
+        "default-src 'none'; "
+        "img-src 'self' data:; "
+        f"style-src 'self' 'nonce-{nonce}'; style-src-attr 'none'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'none'"
+    )
+    assert csp == expected_csp
+
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["Referrer-Policy"] == "no-referrer"
     assert "Strict-Transport-Security" in resp.headers
