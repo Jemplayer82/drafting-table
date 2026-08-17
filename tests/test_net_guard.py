@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
+
+import pytest
 
 import net_guard
 
@@ -87,3 +90,112 @@ def test_public_ip_v6_accepted() -> None:
     assert (
         net_guard._addr_is_forbidden(ipaddress.ip_address("2606:4700:4700::1111")) is False
     )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "gopher://example.com/",
+        "javascript:alert(1)",
+        "ftp://example.com/",
+    ],
+)
+def test_non_http_scheme_rejected(url: str) -> None:
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target(url)
+
+
+def test_credentials_in_url_rejected() -> None:
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target("http://user:pass@example.com/")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/",
+        "http://foo.local/",
+        "http://foo.localhost/",
+        "http://foo.internal/",
+        "http://foo.home.arpa/",
+    ],
+)
+def test_localhost_and_local_suffixes_rejected(url: str) -> None:
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target(url)
+
+
+def test_disallowed_port_rejected_before_dns_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("getaddrinfo must not be called before the port check")
+        ),
+    )
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target("http://obviously-fake-nonexistent-host.invalid:9443/")
+
+
+def test_default_port_applied_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))
+        ],
+    )
+    assert net_guard.resolve_public_target("https://example.test/").port == 443
+    assert net_guard.resolve_public_target("http://example.test/").port == 80
+
+
+def test_resolve_rejects_whole_url_when_any_resolved_address_is_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 0)),
+        ],
+    )
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target("http://example.test/")
+
+
+def test_resolve_returns_first_resolved_address_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("1.1.1.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", 0)),
+        ],
+    )
+    target = net_guard.resolve_public_target("http://example.test/")
+    assert target.ip == ipaddress.ip_address("1.1.1.1")
+
+
+def test_resolve_accepts_real_public_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))
+        ],
+    )
+    target = net_guard.resolve_public_target("https://ok.test/path?x=1")
+    assert target.ip == ipaddress.ip_address("93.184.216.34")
+    assert target.host == "ok.test"
+    assert target.port == 443
+    assert target.scheme == "https"
+    assert target.path_qs == "/path?x=1"
+
+
+def test_ipv6_literal_url_round_trips() -> None:
+    target = net_guard.resolve_public_target("http://[2606:4700:4700::1111]/")
+    assert target.ip == ipaddress.ip_address("2606:4700:4700::1111")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
+import urllib.parse
+from dataclasses import dataclass
 
 
 class NetGuardError(Exception):
@@ -83,3 +86,79 @@ def _addr_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> boo
     if not ip.is_global:
         return True
     return bool(ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
+_ALLOWED_PORTS = frozenset({80, 443})
+_FORBIDDEN_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".home.arpa")
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address
+    host: str        # IDNA-encoded, lowercase, trailing-dot-stripped hostname (NOT the IP)
+    port: int        # always 80 or 443
+    scheme: str       # 'http' or 'https', lowercase
+    path_qs: str      # e.g. '/a/b?x=1'; always starts with '/', never empty
+
+
+def resolve_public_target(url: str) -> ResolvedTarget:
+    """Validates url and resolves its hostname, returning a target safe to connect
+    to. Raises SSRFRejected on any violation. Checks run cheapest/most
+    request-independent first; the port check runs BEFORE DNS resolution --
+    explicitly the single highest-value line in the whole guard per the design doc,
+    since it neutralizes every non-80/443 internal admin port even if every IP
+    check below it has a bug, and it must reject before any socket.getaddrinfo call
+    is made."""
+    parts = urllib.parse.urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise SSRFRejected(f"scheme {parts.scheme!r} is not allowed")
+    if parts.username is not None or parts.password is not None:
+        raise SSRFRejected("credentials embedded in the url are not allowed")
+
+    hostname = parts.hostname
+    if not hostname:
+        raise SSRFRejected("url has no hostname")
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise SSRFRejected(f"hostname failed idna encoding: {exc}") from exc
+    hostname = hostname.rstrip(".")
+    if not hostname:
+        raise SSRFRejected("url has no hostname")
+    lowered = hostname.lower()
+    if lowered == "localhost" or lowered.endswith(_FORBIDDEN_HOST_SUFFIXES):
+        raise SSRFRejected(f"hostname {hostname!r} uses a disallowed local suffix")
+
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise SSRFRejected("invalid port") from exc
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if port not in _ALLOWED_PORTS:
+        raise SSRFRejected(f"port {port} is not allowed -- only 80/443")
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise SSRFRejected(f"dns resolution failed for {hostname!r}: {exc}") from exc
+
+    resolved: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for _family, _socktype, _proto, _canonname, sockaddr in addr_infos:
+        addr_str = sockaddr[0].split("%", 1)[0]  # strip a link-local zone id if present
+        ip = ipaddress.ip_address(addr_str)
+        if _addr_is_forbidden(ip):
+            # Reject the WHOLE url immediately -- do not skip this address and try
+            # another from the list. An attacker's DNS can return one public and
+            # one private address; silently using the public one and ignoring the
+            # private one is a DNS-rebinding invitation.
+            raise SSRFRejected(f"resolved address for {hostname!r} is not a public address")
+        resolved.append(ip)
+    if not resolved:
+        raise SSRFRejected(f"no addresses resolved for {hostname!r}")
+
+    path_qs = parts.path or "/"
+    if parts.query:
+        path_qs += "?" + parts.query
+    return ResolvedTarget(ip=resolved[0], host=hostname, port=port, scheme=scheme, path_qs=path_qs)
