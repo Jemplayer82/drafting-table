@@ -560,7 +560,11 @@ def test_add_decision_inserts_accepted_row(logged_in_client):
 
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/decisions",
-        data={"body_md": body, "rationale_md": rationale, "csrf_token": token},  # pragma: allowlist secret
+        data={
+            "body_md": body,
+            "rationale_md": rationale,
+            "csrf_token": token,  # pragma: allowlist secret
+        },
     )
     assert resp.status_code == 302
     assert resp.headers["Location"] == f"/p/{slug}"
@@ -609,7 +613,11 @@ def test_edit_decision_creates_new_row_and_supersedes_old_without_mutating_it(
     token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/projects/{proj['id']}/decisions/{old_id}/edit",
-        data={"body_md": new_body, "rationale_md": new_rationale, "csrf_token": token},  # pragma: allowlist secret
+        data={
+            "body_md": new_body,
+            "rationale_md": new_rationale,
+            "csrf_token": token,  # pragma: allowlist secret
+        },
     )
     assert resp.status_code == 302
 
@@ -643,7 +651,11 @@ def test_add_decision_empty_body_rerenders_with_error(logged_in_client):
     token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/decisions",
-        data={"body_md": "", "rationale_md": "rationale", "csrf_token": token},  # pragma: allowlist secret
+        data={
+            "body_md": "",
+            "rationale_md": "rationale",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
     )
     assert resp.status_code == 200
     assert b"dt-alert--danger" in resp.data
