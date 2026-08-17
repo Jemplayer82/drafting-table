@@ -1,258 +1,342 @@
-from __future__ import annotations
+"""SSRF-hardened network utilities for the worker ingest pipeline.
 
+This module validates outbound URLs (scheme, DNS resolution, public IP
+constraints) and performs fetches with a bounded wall-clock budget.
+"""
+
+import dataclasses
 import ipaddress
 import socket
+import threading
 import time
-import urllib.parse
-from dataclasses import dataclass
+from urllib.parse import urlparse, urljoin
 
 import httpx
 
 
 class NetGuardError(Exception):
-    """Base class for every failure net_guard raises. Callers outside this module
-    (worker.py) must catch this base class, never bare Exception, so unrelated bugs
-    are never silently swallowed."""
+    """Base class for all net_guard failures."""
+    pass
 
 
 class SSRFRejected(NetGuardError):
-    """Raised when a URL, hostname, port, or a resolved IP address fails the SSRF
-    policy. Never let this exception's message reach an end user -- it can describe
-    internal network topology (which check fired, what address was rejected)."""
+    """Raised when a URL or its resolved address fails SSRF validation."""
+    pass
 
 
 class FetchError(NetGuardError):
-    """Raised by fetch() (added in a later step) for failures that happen only
-    after a hop's target has already passed validation: too many redirects, an
-    oversized body, a timeout, or an underlying transport/connection error."""
+    """Raised when the HTTP fetch itself fails."""
+    pass
 
 
-@dataclass(frozen=True)
-class FetchResult:
-    status_code: int
-    headers: dict[str, str]
-    body: bytes
-    final_url: str
+_MAX_REDIRECTS = 10
+_DEFAULT_FETCH_TIMEOUT = 30.0
+_DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+_DNS_RESOLUTION_TIMEOUT = 10.0
 
+_ALLOWED_SCHEMES = frozenset(("http", "https"))
+_ALLOWED_PORTS = frozenset((80, 443))
 
-_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+_FORBIDDEN_HOST_SUFFIXES = (
+    ".local",
+    ".localhost",
+    ".internal",
+    ".home.arpa",
 )
-_STREAM_CHUNK_SIZE = 65536
 
-
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
 
 
-def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address:
-    return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-
-
-def _addr_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True if ip must never be connected to.
-
-    ORDERING IS DELIBERATE, DO NOT "SIMPLIFY" IT: for an IPv6 address, the
-    embedded-IPv4 unwrap (ipv4_mapped / sixtofour / teredo / NAT64 / deprecated
-    ::-IPv4-compatible) runs UNCONDITIONALLY, before the generic not-is_global /
-    multicast / reserved / unspecified check below it -- not after. Verified on the
-    installed interpreter: ip.is_global already internally special-cases
-    ipv4_mapped and blanket-excludes the ENTIRE teredo (2001::/23) and 6to4
-    (2002::/16) prefixes via its own private-ranges table. If the generic check ran
-    FIRST, those three unwrap branches would be short-circuited before ever
-    executing for any input that would prove them correct -- a broken
-    implementation (e.g. one that crashes on .teredo's 2-tuple return value, or
-    silently no-ops on it) would still pass every test, because the outer check
-    already returns True first. Running the unwrap first keeps that code live and
-    genuinely exercised by tests. It does not change the final True/False verdict
-    for any input (every branch is an independent sufficient condition, OR'd
-    together) -- it only changes which branch fires first and what a test actually
-    proves.
-
-    Two branches ARE live, exploitable gaps on the installed interpreter (not just
-    defense-in-depth), confirmed empirically: NAT64's well-known prefix
-    64:ff9b::/96 (ipaddress.ip_address('64:ff9b::c0a8:701').is_global is True) and
-    the deprecated IPv4-compatible ::/96 range (ipaddress.ip_address('::192.168.7.50')
-    has .ipv4_mapped is None -- .ipv4_mapped only matches the DIFFERENT prefix
-    ::ffff:0:0/96 -- AND .is_global is True). Both would silently pass a naive
-    `not ip.is_global` check alone.
-
-    NEVER use ip.is_private anywhere in this module: ipaddress.ip_address('100.64.0.1')
-    (CGNAT space) has .is_private == False, so is_private would let CGNAT-routed
-    traffic through. .is_global is the correct, and only correct, global-
-    reachability check.
-    """
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None and _addr_is_forbidden(ip.ipv4_mapped):
-            return True
-        if ip.sixtofour is not None and _addr_is_forbidden(ip.sixtofour):
-            return True
-        if ip.teredo is not None:
-            # .teredo returns a 2-TUPLE (server, client) of IPv4Address, unlike
-            # .ipv4_mapped/.sixtofour which return a single IPv4Address or None --
-            # passing the tuple whole to _addr_is_forbidden crashes or misbehaves.
-            # The client half is where a hostile teredo address embeds its real
-            # target; check both.
-            server, client = ip.teredo
-            if _addr_is_forbidden(server) or _addr_is_forbidden(client):
-                return True
-        if ip in _NAT64_NETWORK and _addr_is_forbidden(_embedded_v4(ip)):
-            return True
-        if ip in _IPV4_COMPAT_NETWORK and _addr_is_forbidden(_embedded_v4(ip)):
-            return True
-    if not ip.is_global:
-        return True
-    return bool(ip.is_multicast or ip.is_reserved or ip.is_unspecified)
-
-
-_ALLOWED_PORTS = frozenset({80, 443})
-_FORBIDDEN_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".home.arpa")
-
-
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ResolvedTarget:
+    """A URL target whose hostname has been resolved to a concrete public IP."""
+    scheme: str
+    host: str
+    port: int
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address
-    host: str        # IDNA-encoded, lowercase, trailing-dot-stripped hostname (NOT the IP)
-    port: int        # always 80 or 443
-    scheme: str       # 'http' or 'https', lowercase
-    path_qs: str      # e.g. '/a/b?x=1'; always starts with '/', never empty
+    path_qs: str
+
+    @property
+    def host_header(self) -> str:
+        if self.ip.version == 6:
+            return f"[{self.host}]"
+        return self.host
+
+    @property
+    def url(self) -> str:
+        if self.ip.version == 6:
+            netloc = f"[{self.ip}]:{self.port}"
+        else:
+            netloc = f"{self.ip}:{self.port}"
+        return f"{self.scheme}://{netloc}{self.path_qs}"
+
+    def __str__(self) -> str:
+        return self.url
+
+
+@dataclasses.dataclass(frozen=True)
+class FetchResult:
+    status_code: int
+    body: bytes
+    headers: dict
+    final_url: str
+
+
+def _addr_is_forbidden(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if *addr* is not a publicly routable IP address."""
+    if addr.version == 4:
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+        ):
+            return True
+        if addr in _CGNAT_NETWORK:
+            return True
+        return False
+
+    # IPv6
+    if (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    ):
+        return True
+
+    if addr.ipv4_mapped is not None and _addr_is_forbidden(addr.ipv4_mapped):
+        return True
+
+    if addr in _NAT64_NETWORK and _addr_is_forbidden(_embedded_v4(addr)):
+        return True
+
+    if addr in _IPV4_COMPAT_NETWORK and _addr_is_forbidden(_embedded_v4(addr)):
+        return True
+
+    if addr.sixtofour is not None and _addr_is_forbidden(addr.sixtofour):
+        return True
+
+    if addr.teredo is not None:
+        server, client = addr.teredo
+        if _addr_is_forbidden(server) or _addr_is_forbidden(client):
+            return True
+
+    return False
+
+
+def _embedded_v4(addr: ipaddress.IPv6Address) -> ipaddress.IPv4Address:
+    """Extract the IPv4 address encoded in the low 32 bits of *addr*."""
+    return ipaddress.IPv4Address(int.from_bytes(addr.packed[-4:], "big"))
+
+
+def _resolve_with_timeout(hostname: str, port: int):
+    """Resolve *hostname*/*port* with a hard timeout.
+
+    socket.getaddrinfo() has no timeout argument and may block for a very long
+    time if an authoritative nameserver drops queries.  We run the call in a
+    daemon thread and abandon it on timeout so the caller can never be blocked
+    indefinitely by one hostile DNS server.
+    """
+    result = [None]
+    error = [None]
+
+    def _resolve():
+        try:
+            result[0] = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except Exception as exc:  # noqa: BLE001
+            error[0] = exc
+
+    resolver_thread = threading.Thread(target=_resolve, daemon=True)
+    resolver_thread.start()
+    resolver_thread.join(_DNS_RESOLUTION_TIMEOUT)
+
+    if resolver_thread.is_alive():
+        raise SSRFRejected("DNS resolution timed out")
+
+    if error[0] is not None:
+        raise error[0]
+
+    if result[0] is None:
+        raise SSRFRejected("DNS resolution returned no results")
+
+    return result[0]
 
 
 def resolve_public_target(url: str) -> ResolvedTarget:
-    """Validates url and resolves its hostname, returning a target safe to connect
-    to. Raises SSRFRejected on any violation. Checks run cheapest/most
-    request-independent first; the port check runs BEFORE DNS resolution --
-    explicitly the single highest-value line in the whole guard per the design doc,
-    since it neutralizes every non-80/443 internal admin port even if every IP
-    check below it has a bug, and it must reject before any socket.getaddrinfo call
-    is made."""
-    parts = urllib.parse.urlsplit(url)
-    scheme = (parts.scheme or "").lower()
-    if scheme not in ("http", "https"):
-        raise SSRFRejected(f"scheme {parts.scheme!r} is not allowed")
-    if parts.username is not None or parts.password is not None:
-        raise SSRFRejected("credentials embedded in the url are not allowed")
+    """Validate *url* and return a ResolvedTarget safe for fetch().
 
-    hostname = parts.hostname
-    if not hostname:
-        raise SSRFRejected("url has no hostname")
-    try:
-        hostname = hostname.encode("idna").decode("ascii")
-    except UnicodeError as exc:
-        raise SSRFRejected(f"hostname failed idna encoding: {exc}") from exc
-    hostname = hostname.rstrip(".")
-    if not hostname:
-        raise SSRFRejected("url has no hostname")
-    lowered = hostname.lower()
-    if lowered == "localhost" or lowered.endswith(_FORBIDDEN_HOST_SUFFIXES):
-        raise SSRFRejected(f"hostname {hostname!r} uses a disallowed local suffix")
+    The returned target contains the first resolved public IP while preserving
+    the original hostname for the HTTP Host header / TLS SNI.  The DNS lookup
+    itself is capped by _DNS_RESOLUTION_TIMEOUT so it cannot stall the worker.
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise SSRFRejected("Only http and https URLs are allowed")
+
+    if parsed.username is not None or parsed.password is not None:
+        raise SSRFRejected("URL must not contain credentials")
+
+    if not parsed.hostname:
+        raise SSRFRejected("URL has no hostname")
+
+    hostname = parsed.hostname.lower()
+
+    for suffix in _FORBIDDEN_HOST_SUFFIXES:
+        bare = suffix.lstrip(".")
+        if hostname == bare or hostname.endswith(suffix):
+            raise SSRFRejected("URL hostname is not allowed")
 
     try:
-        port = parts.port
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as exc:
-        raise SSRFRejected("invalid port") from exc
-    if port is None:
-        port = 443 if scheme == "https" else 80
+        raise SSRFRejected("Invalid URL port") from exc
+
     if port not in _ALLOWED_PORTS:
-        raise SSRFRejected(f"port {port} is not allowed -- only 80/443")
+        raise SSRFRejected("URL port is not allowed")
 
     try:
-        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise SSRFRejected(f"dns resolution failed for {hostname!r}: {exc}") from exc
+        ascii_host = hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise SSRFRejected("URL hostname is not valid") from exc
 
-    resolved: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-    for _family, _socktype, _proto, _canonname, sockaddr in addr_infos:
-        addr_str = sockaddr[0].split("%", 1)[0]  # strip a link-local zone id if present
-        ip = ipaddress.ip_address(addr_str)
+    path_qs = parsed.path or ""
+    if parsed.query:
+        path_qs += "?" + parsed.query
+
+    try:
+        ip = ipaddress.ip_address(ascii_host)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
         if _addr_is_forbidden(ip):
-            # Reject the WHOLE url immediately -- do not skip this address and try
-            # another from the list. An attacker's DNS can return one public and
-            # one private address; silently using the public one and ignoring the
-            # private one is a DNS-rebinding invitation.
-            raise SSRFRejected(f"resolved address for {hostname!r} is not a public address")
-        resolved.append(ip)
-    if not resolved:
-        raise SSRFRejected(f"no addresses resolved for {hostname!r}")
+            raise SSRFRejected("URL resolves to a non-public address")
+        return ResolvedTarget(
+            scheme=parsed.scheme,
+            host=hostname,
+            port=port,
+            ip=ip,
+            path_qs=path_qs,
+        )
 
-    path_qs = parts.path or "/"
-    if parts.query:
-        path_qs += "?" + parts.query
-    return ResolvedTarget(ip=resolved[0], host=hostname, port=port, scheme=scheme, path_qs=path_qs)
+    try:
+        addrinfo = _resolve_with_timeout(ascii_host, port)
+    except socket.gaierror as exc:
+        raise SSRFRejected("Could not resolve URL hostname") from exc
+
+    if not addrinfo:
+        raise SSRFRejected("Could not resolve URL hostname")
+
+    for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
+        resolved_ip = ipaddress.ip_address(sockaddr[0])
+        if _addr_is_forbidden(resolved_ip):
+            raise SSRFRejected("URL resolves to a non-public address")
+
+    first_family, _socktype, _proto, _canonname, first_sockaddr = addrinfo[0]
+    first_ip = ipaddress.ip_address(first_sockaddr[0])
+
+    return ResolvedTarget(
+        scheme=parsed.scheme,
+        host=hostname,
+        port=port,
+        ip=first_ip,
+        path_qs=path_qs,
+    )
 
 
-def _hop_url(target: ResolvedTarget) -> str:
-    host = f"[{target.ip}]" if isinstance(target.ip, ipaddress.IPv6Address) else str(target.ip)
-    return f"{target.scheme}://{host}:{target.port}{target.path_qs}"
+def _hop_url(base_url: str, location: str) -> str:
+    """Resolve a redirect Location header relative to *base_url*."""
+    return urljoin(base_url, location)
+
+
+def _read_body(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read *response* into memory, raising if it exceeds *max_bytes*."""
+    chunks = []
+    total = 0
+    for chunk in response.iter_bytes():
+        total += len(chunk)
+        if total > max_bytes:
+            raise FetchError("Response body exceeds maximum allowed size")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def fetch(
     url: str,
     *,
-    max_redirects: int = 3,
-    max_bytes: int = 2_000_000,
-    timeout: float = 20.0,
+    client: httpx.Client | None = None,
+    timeout: float = _DEFAULT_FETCH_TIMEOUT,
+    max_redirects: int = _MAX_REDIRECTS,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
 ) -> FetchResult:
-    """SSRF-guarded GET. Re-validates EVERY hop (initial request and every
-    redirect) through resolve_public_target() before connecting -- this closes the
-    TOCTOU hole of validating once and then reconnecting by hostname on a
-    redirect. Connects to the RESOLVED IP directly (builds the request URL against
-    target.ip, never lets httpx re-resolve the hostname itself) while pinning TLS
-    SNI and certificate validation to the ORIGINAL hostname via httpx's documented
-    `extensions={'sni_hostname': ...}` mechanism -- verified by reading the
-    installed httpx/httpcore source directly: httpcore's connection code
-    (_sync/connection.py, _connect()) reads request.extensions.get('sni_hostname')
-    and passes it as `server_hostname` for the TLS handshake, covering both SNI
-    and cert-hostname verification in one mechanism; httpx's Request._prepare()
-    only auto-sets a Host header when one isn't already present in the headers you
-    pass, so an explicit Host header is respected as-is, never overwritten. Do not
-    disable certificate verification. The `timeout` param is a wall-clock budget
-    covering the WHOLE fetch including every redirect hop (recomputed each loop
-    iteration), not a per-hop timeout. max_bytes is enforced by counting actual
-    bytes read while streaming, never by trusting Content-Length (a server can lie
-    about or omit it)."""
+    """Fetch *url* safely, following redirects manually.
+
+    ``timeout`` is a wall-clock budget covering the WHOLE fetch, including
+    every redirect hop.  Within each hop the actual HTTP stream is bounded by
+    the remaining budget via ``client.stream(..., timeout=remaining)``.
+
+    DNS resolution of each hop (performed by :func:`resolve_public_target`) is
+    capped by the fixed module-level ``_DNS_RESOLUTION_TIMEOUT`` constant.  It is
+    therefore not charged against ``remaining`` to the second, but it can never
+    block the caller indefinitely.
+    """
+    close_client = client is None
+    if close_client:
+        client = httpx.Client(follow_redirects=False)
+
     deadline = time.monotonic() + timeout
     current_url = url
-    redirects_used = 0
+    redirects_remaining = max_redirects
 
-    with httpx.Client(follow_redirects=False) as client:
+    try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise FetchError(f"fetch of {url!r} timed out")
+                raise FetchError("Fetch wall-clock budget exhausted")
 
+            # Must remain a single-argument call so tests that monkeypatch
+            # resolve_public_target with a one-arg lambda keep working.
             target = resolve_public_target(current_url)
-            request_url = _hop_url(target)
+
             try:
                 with client.stream(
                     "GET",
-                    request_url,
-                    headers={"Host": target.host, "User-Agent": _USER_AGENT},
-                    extensions={"sni_hostname": target.host},
+                    target.url,
+                    headers={"Host": target.host_header},
+                    follow_redirects=False,
                     timeout=remaining,
-                ) as resp:
-                    location = resp.headers.get("location")
-                    if resp.status_code in _REDIRECT_STATUSES and location:
-                        redirects_used += 1
-                        if redirects_used > max_redirects:
-                            raise FetchError(f"exceeded max_redirects={max_redirects}")
-                        current_url = urllib.parse.urljoin(current_url, location)
-                        continue
+                    extensions={"sni_hostname": target.host},
+                ) as response:
+                    body = _read_body(response, max_bytes)
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+                raise FetchError("Could not fetch URL") from exc
 
-                    body = bytearray()
-                    for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
-                        body += chunk
-                        if len(body) > max_bytes:
-                            raise FetchError(f"response exceeded max_bytes={max_bytes}")
-                    return FetchResult(
-                        status_code=resp.status_code,
-                        headers=dict(resp.headers),
-                        body=bytes(body),
-                        final_url=current_url,
-                    )
-            except httpx.TimeoutException as exc:
-                raise FetchError(f"timed out fetching {current_url!r}") from exc
-            except httpx.TransportError as exc:
-                raise FetchError(f"connection error fetching {current_url!r}") from exc
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return FetchResult(
+                    status_code=response.status_code,
+                    body=body,
+                    headers=dict(response.headers),
+                    final_url=current_url,
+                )
+
+            if redirects_remaining <= 0:
+                raise FetchError("Too many redirects")
+
+            redirects_remaining -= 1
+            location = response.headers.get("location")
+            if not location:
+                raise FetchError("Redirect response missing Location header")
+
+            current_url = _hop_url(current_url, location)
+
+    finally:
+        if close_client:
+            client.close()
