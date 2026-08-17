@@ -348,7 +348,9 @@ def _render_project(
 
     decisions_view = []
     for row in decision_rows:
-        label = row["rationale_md"].strip("*") if row["rationale_md"] else None
+        rationale = (row["rationale_md"] or "").strip()
+        label_match = re.fullmatch(r"\*\*(.+)\*\*", rationale, re.DOTALL)
+        label = label_match.group(1).strip() or None if label_match else None
         decisions_view.append({
             "id": row["id"], "label": label, "body_md": row["body_md"],
             "rationale_md": row["rationale_md"],
