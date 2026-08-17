@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import time
 import urllib.parse
 from dataclasses import dataclass
+
+import httpx
 
 
 class NetGuardError(Exception):
@@ -22,6 +25,22 @@ class FetchError(NetGuardError):
     """Raised by fetch() (added in a later step) for failures that happen only
     after a hop's target has already passed validation: too many redirects, an
     oversized body, a timeout, or an underlying transport/connection error."""
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+    final_url: str
+
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_STREAM_CHUNK_SIZE = 65536
 
 
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
@@ -162,3 +181,78 @@ def resolve_public_target(url: str) -> ResolvedTarget:
     if parts.query:
         path_qs += "?" + parts.query
     return ResolvedTarget(ip=resolved[0], host=hostname, port=port, scheme=scheme, path_qs=path_qs)
+
+
+def _hop_url(target: ResolvedTarget) -> str:
+    host = f"[{target.ip}]" if isinstance(target.ip, ipaddress.IPv6Address) else str(target.ip)
+    return f"{target.scheme}://{host}:{target.port}{target.path_qs}"
+
+
+def fetch(
+    url: str,
+    *,
+    max_redirects: int = 3,
+    max_bytes: int = 2_000_000,
+    timeout: float = 20.0,
+) -> FetchResult:
+    """SSRF-guarded GET. Re-validates EVERY hop (initial request and every
+    redirect) through resolve_public_target() before connecting -- this closes the
+    TOCTOU hole of validating once and then reconnecting by hostname on a
+    redirect. Connects to the RESOLVED IP directly (builds the request URL against
+    target.ip, never lets httpx re-resolve the hostname itself) while pinning TLS
+    SNI and certificate validation to the ORIGINAL hostname via httpx's documented
+    `extensions={'sni_hostname': ...}` mechanism -- verified by reading the
+    installed httpx/httpcore source directly: httpcore's connection code
+    (_sync/connection.py, _connect()) reads request.extensions.get('sni_hostname')
+    and passes it as `server_hostname` for the TLS handshake, covering both SNI
+    and cert-hostname verification in one mechanism; httpx's Request._prepare()
+    only auto-sets a Host header when one isn't already present in the headers you
+    pass, so an explicit Host header is respected as-is, never overwritten. Do not
+    disable certificate verification. The `timeout` param is a wall-clock budget
+    covering the WHOLE fetch including every redirect hop (recomputed each loop
+    iteration), not a per-hop timeout. max_bytes is enforced by counting actual
+    bytes read while streaming, never by trusting Content-Length (a server can lie
+    about or omit it)."""
+    deadline = time.monotonic() + timeout
+    current_url = url
+    redirects_used = 0
+
+    with httpx.Client(follow_redirects=False) as client:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FetchError(f"fetch of {url!r} timed out")
+
+            target = resolve_public_target(current_url)
+            request_url = _hop_url(target)
+            try:
+                with client.stream(
+                    "GET",
+                    request_url,
+                    headers={"Host": target.host, "User-Agent": _USER_AGENT},
+                    extensions={"sni_hostname": target.host},
+                    timeout=remaining,
+                ) as resp:
+                    location = resp.headers.get("location")
+                    if resp.status_code in _REDIRECT_STATUSES and location:
+                        redirects_used += 1
+                        if redirects_used > max_redirects:
+                            raise FetchError(f"exceeded max_redirects={max_redirects}")
+                        current_url = urllib.parse.urljoin(current_url, location)
+                        continue
+
+                    body = bytearray()
+                    for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+                        body += chunk
+                        if len(body) > max_bytes:
+                            raise FetchError(f"response exceeded max_bytes={max_bytes}")
+                    return FetchResult(
+                        status_code=resp.status_code,
+                        headers=dict(resp.headers),
+                        body=bytes(body),
+                        final_url=current_url,
+                    )
+            except httpx.TimeoutException as exc:
+                raise FetchError(f"timed out fetching {current_url!r}") from exc
+            except httpx.TransportError as exc:
+                raise FetchError(f"connection error fetching {current_url!r}") from exc
