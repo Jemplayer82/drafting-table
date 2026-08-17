@@ -7,7 +7,7 @@ import secrets
 import sys
 from typing import Any
 
-from flask import Flask, Response, g, redirect, render_template, request, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 import auth
 import db
@@ -275,6 +275,39 @@ def decision_edit(project_id, decision_id):
     if new_id is None:
         return "", 404
     return redirect(f"/p/{slug}")
+
+
+@app.route("/api/projects/<int:project_id>/drop", methods=["POST"])
+def item_drop(project_id):
+    proj = _project_or_404(project_id)
+    if proj is None:
+        return "", 404
+    slug = proj["slug"]
+    raw_text = request.form.get("raw_text", "").strip()
+    if not raw_text:
+        return _render_project(slug, item_error="A note is required.")
+    item_id, _job_id = db.create_note_and_ingest_job(project_id, raw_text)
+    return redirect(f"/p/{slug}#item-{item_id}")
+
+
+@app.route("/api/projects/<int:project_id>/status")
+def project_status(project_id):
+    proj = _project_or_404(project_id)
+    if proj is None:
+        return "", 404
+    jobs = db.list_active_jobs(project_id)
+    job_rows = [
+        {"id": j["id"], "kind": j["kind"], "status": j["status"], "phase": j["phase"]}
+        for j in jobs
+    ]
+    payload = {
+        "jobs": job_rows,
+        "item_rev": db.items_rev(project_id),
+        "syn_version": db.latest_synthesis_version(project_id),
+    }
+    resp = jsonify(payload)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _render_project(
