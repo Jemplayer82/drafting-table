@@ -216,3 +216,28 @@ def test_status_on_archived_project_404s(logged_in_client):
 def test_status_requires_auth(client):
     resp = client.get("/api/projects/1/status")
     assert resp.status_code == 401
+
+
+def test_project_page_renders_drop_form(logged_in_client):
+    project_id, slug = db.create_project("Drop Form", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    assert b'/drop"' in resp.data
+    assert b'name="raw_text"' in resp.data
+
+
+def test_project_page_renders_job_status_badge(logged_in_client):
+    project_id, slug = db.create_project("Badge Test", None)
+    item_id, job_id = db.create_note_and_ingest_job(project_id, "pending note")
+
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='running', phase='analyze' WHERE id=?",
+            (job_id,),
+        )
+
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    assert b'data-job-status="running"' in resp.data
+    assert f'data-job-id="{job_id}"'.encode() in resp.data
+    assert b"analyze" in resp.data

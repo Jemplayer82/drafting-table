@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ project.name }} — drafting table{% endblock %}
 {% block content %}
-<div class="dt-page">
+<div class="dt-page" data-project-id="{{ project.id }}">
 
   <div class="dt-rule">
     <span class="dt-rule__label">{{ project.name|lower }}</span>
@@ -69,6 +69,14 @@
           <p class="dt-empty">no open questions.</p>
         {% endif %}
       </div>
+      <div class="fc-panel">
+        <span class="fc-panel__title">drop</span>
+        <form method="post" action="/api/projects/{{ project.id }}/drop">
+          <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+          <textarea class="fc-input" name="raw_text" rows="3" placeholder="Drop a note..." required></textarea>
+          <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">drop</button>
+        </form>
+      </div>
     </div>
 
     <div class="dt-items">
@@ -81,6 +89,10 @@
         {% endif %}
         <div class="dt-item__body">
           <div class="dt-item__title">{{ item.title or 'untitled' }}</div>
+          {% if item.status == 'pending' %}
+          {% set job = jobs_by_item.get(item.id) %}
+          <span class="dt-item__job" data-job-status="{{ job.status if job else 'queued' }}" data-job-id="{{ job.id if job else '' }}">{{ (job.phase or job.status) if job else 'queued' }}&hellip;</span>
+          {% endif %}
           {% if item.tag %}<div class="dt-item__tag">{{ item.tag }}</div>{% endif %}
           {% if item.note_md %}<p class="dt-item__note">{{ item.note_md }}</p>{% endif %}
           {% if item.swatches %}

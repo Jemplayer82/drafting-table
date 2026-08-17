@@ -356,6 +356,8 @@ def _render_project(
             (proj["id"],),
         ).fetchall()
 
+    jobs_by_item = db.live_jobs_by_item(proj["id"])
+
     swatches_by_item = {}
     for row in swatch_rows:
         # Defense-in-depth: skip any hex that fails validation, even though
@@ -395,6 +397,7 @@ def _render_project(
         direction_lines=direction_lines, questions=questions,
         decisions=decisions_view, nonce=g.csp_nonce,
         open_item_id=open_item_id, item_error=item_error, decision_error=decision_error,
+        jobs_by_item=jobs_by_item,
     )
 
 
