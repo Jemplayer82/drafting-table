@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import sys
 from typing import Any
 
 from flask import Flask, Response, g, redirect, render_template, request, url_for
@@ -407,11 +408,20 @@ def item_delete(item_id):
         return "", 404
     slug = owner["slug"]
     paths = db.delete_item(item_id)
+    failed_paths = []
     for path in paths:
         try:
             (db.MEDIA_DIR / path).unlink()
         except FileNotFoundError:
             pass
+        except OSError:
+            failed_paths.append(path)
+    if failed_paths:
+        print(
+            f"WARNING: item_delete({item_id}) DB deletion succeeded but media files "
+            f"could not be unlinked: {failed_paths}",
+            file=sys.stderr,
+        )
     return redirect(f"/p/{slug}")
 
 
