@@ -70,6 +70,58 @@
             {% endfor %}
           </div>
           {% endif %}
+          <div class="dt-item__actions">
+            <button type="button" class="fc-btn fc-btn--ghost fc-btn--sm" data-toggle="item-edit-{{ item.id }}">edit</button>
+            <form method="post" action="/api/items/{{ item.id }}/move">
+              <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+              <input type="hidden" name="direction" value="up">
+              <button type="submit" class="fc-btn fc-btn--ghost fc-btn--sm" {% if loop.first %}disabled{% endif %}>&#8593;</button>
+            </form>
+            <form method="post" action="/api/items/{{ item.id }}/move">
+              <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+              <input type="hidden" name="direction" value="down">
+              <button type="submit" class="fc-btn fc-btn--ghost fc-btn--sm" {% if loop.last %}disabled{% endif %}>&#8595;</button>
+            </form>
+            <form method="post" action="/api/items/{{ item.id }}/delete" data-confirm="Delete this item? This cannot be undone.">
+              <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+              <button type="submit" class="fc-btn fc-btn--danger fc-btn--sm">delete</button>
+            </form>
+          </div>
+
+          <div class="dt-item__edit {{ '' if item.id == open_item_id else 'd-none' }}" id="item-edit-{{ item.id }}">
+            <form method="post" action="/api/items/{{ item.id }}/edit">
+              <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+              <div class="fc-field">
+                <label class="fc-field__label">Title</label>
+                <input class="fc-input" type="text" name="title" value="{{ item.title or '' }}">
+              </div>
+              <div class="fc-field">
+                <label class="fc-field__label">Tag</label>
+                <input class="fc-input" type="text" name="tag" value="{{ item.tag or '' }}">
+              </div>
+              <div class="fc-field">
+                <label class="fc-field__label">Note</label>
+                <textarea class="fc-input" name="note_md" rows="3">{{ item.note_md or '' }}</textarea>
+              </div>
+              <div class="fc-field">
+                <label class="fc-field__label">Swatches</label>
+                {% for sw in item.swatches %}
+                <div class="dt-swatch-row">
+                  <input class="fc-input" type="text" name="swatch_hex" value="{{ sw.hex }}" placeholder="#RRGGBB">
+                  <input class="fc-input" type="text" name="swatch_label" value="{{ sw.label or '' }}" placeholder="label">
+                </div>
+                {% endfor %}
+                <div class="dt-swatch-row">
+                  <input class="fc-input" type="text" name="swatch_hex" value="" placeholder="#RRGGBB">
+                  <input class="fc-input" type="text" name="swatch_label" value="" placeholder="label">
+                </div>
+              </div>
+              {% if item_error and item.id == open_item_id %}
+              <div class="dt-alert dt-alert--danger">! {{ item_error }}</div>
+              {% endif %}
+              <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">save</button>
+            </form>
+          </div>
         </div>
       </div>
       {% endfor %}

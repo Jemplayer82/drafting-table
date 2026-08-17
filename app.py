@@ -49,6 +49,17 @@ _PUBLIC_PATHS = {"/login", "/healthz"}
 _MEDIA_ID_RE = re.compile(r"[0-9a-f]{32}")
 _HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 _MEDIA_EXT_BY_MIME = {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png"}
+_ITEM_EDIT_FIELDS = db.ITEM_USER_EDITABLE - {"position"}
+
+
+def _item_owner_or_404(item_id: int):
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT items.id, projects.slug FROM items "
+            "JOIN projects ON projects.id = items.project_id "
+            "WHERE items.id = ? AND projects.archived_at IS NULL",
+            (item_id,),
+        ).fetchone()
 
 
 def _is_public(path: str) -> bool:
@@ -316,6 +327,62 @@ def project_detail(slug):  # noqa: ANN001, ANN201
     if html is None:
         return "", 404
     return html
+
+
+@app.route("/api/items/<int:item_id>/edit", methods=["POST"])
+def item_edit(item_id):
+    owner = _item_owner_or_404(item_id)
+    if owner is None:
+        return "", 404
+    slug = owner["slug"]
+
+    fields = {key: (request.form.get(key, "").strip() or None) for key in _ITEM_EDIT_FIELDS}
+
+    hexes = request.form.getlist("swatch_hex")
+    labels = request.form.getlist("swatch_label")
+    swatches = []
+    for hex_value, label in zip(hexes, labels, strict=False):
+        hex_value = hex_value.strip()
+        if not hex_value:
+            continue
+        if not _HEX_RE.fullmatch(hex_value):
+            return _render_project(
+                slug, open_item_id=item_id,
+                item_error=f"Invalid swatch color {hex_value!r} -- use #RRGGBB.",
+            )
+        swatches.append({"hex": hex_value, "label": label.strip() or None})
+
+    db.update_item(item_id, **fields)
+    db.replace_swatches(item_id, swatches)
+    return redirect(f"/p/{slug}#item-{item_id}")
+
+
+@app.route("/api/items/<int:item_id>/delete", methods=["POST"])
+def item_delete(item_id):
+    owner = _item_owner_or_404(item_id)
+    if owner is None:
+        return "", 404
+    slug = owner["slug"]
+    paths = db.delete_item(item_id)
+    for path in paths:
+        try:
+            (db.MEDIA_DIR / path).unlink()
+        except FileNotFoundError:
+            pass
+    return redirect(f"/p/{slug}")
+
+
+@app.route("/api/items/<int:item_id>/move", methods=["POST"])
+def item_move(item_id):
+    owner = _item_owner_or_404(item_id)
+    if owner is None:
+        return "", 404
+    slug = owner["slug"]
+    direction = request.form.get("direction", "")
+    if direction not in ("up", "down"):
+        return "", 400
+    db.move_item(item_id, direction)
+    return redirect(f"/p/{slug}")
 
 
 if __name__ == "__main__":
