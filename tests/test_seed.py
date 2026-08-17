@@ -255,7 +255,10 @@ def test_seed_syntheses_and_decisions_rows(seeded_db):
     assert "palette-hunting" in synth["direction_md"]
     questions = json.loads(synth["questions_json"])
     assert len(questions) == 5
-    assert all(q == {"question": q["question"], "why": ""} for q in questions)
+
+    real_questions = seed_module.parse_source()[1]["questions"]
+    expected_questions = [{"question": q, "why": ""} for q in real_questions]
+    assert questions == expected_questions
 
     assert real_decisions == 0
     assert len(example_decisions) == 2
