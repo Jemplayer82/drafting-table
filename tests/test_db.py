@@ -172,6 +172,84 @@ def test_move_item_invalid_direction_raises_value_error(app_env):
         raise AssertionError("expected ValueError for invalid direction")
 
 
+def test_move_item_tied_position_swaps_by_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Tie Test", None)
+    with db.connect() as conn:
+        older = _insert_item(conn, pid, db, position=5)
+        newer = _insert_item(conn, pid, db, position=5)
+
+    # Moving the higher-id item up must find the lower-id neighbor.
+    assert db.move_item(newer, "up") is True
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, position FROM items WHERE project_id = ? ORDER BY position, id",
+            (pid,),
+        ).fetchall()
+    assert rows[0]["id"] == newer
+    assert rows[0]["position"] == 0
+    assert rows[1]["id"] == older
+    assert rows[1]["position"] == 1
+
+    # Reset both items to the same position.
+    db.update_item(older, position=5)
+    db.update_item(newer, position=5)
+
+    # Moving the lower-id item down must find the higher-id neighbor.
+    assert db.move_item(older, "down") is True
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, position FROM items WHERE project_id = ? ORDER BY position, id",
+            (pid,),
+        ).fetchall()
+    assert rows[0]["id"] == newer
+    assert rows[0]["position"] == 0
+    assert rows[1]["id"] == older
+    assert rows[1]["position"] == 1
+
+
+def test_move_item_tied_position_picks_immediate_neighbor_by_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Three-way Tie Test", None)
+    with db.connect() as conn:
+        a = _insert_item(conn, pid, db, position=10)
+        b = _insert_item(conn, pid, db, position=10)
+        c = _insert_item(conn, pid, db, position=10)
+
+    # Moving the middle item up must swap with its immediate lower-id neighbor (a).
+    assert db.move_item(b, "up") is True
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM items WHERE project_id = ? ORDER BY position, id",
+            (pid,),
+        ).fetchall()
+    assert [row["id"] for row in rows] == [b, a, c]
+
+    # Reset positions so all three are tied again.
+    db.update_item(a, position=10)
+    db.update_item(b, position=10)
+    db.update_item(c, position=10)
+
+    # Moving the middle item down must swap with its immediate higher-id neighbor (c).
+    assert db.move_item(b, "down") is True
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM items WHERE project_id = ? ORDER BY position, id",
+            (pid,),
+        ).fetchall()
+    assert [row["id"] for row in rows] == [a, c, b]
+
+
 def test_delete_item_removes_row_and_returns_media_paths(app_env):
     import db
 
