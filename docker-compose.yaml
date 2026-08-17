@@ -1,0 +1,54 @@
+# Two services from one image, per the design in the plan doc:
+# jobs run in a dedicated worker process, not in gunicorn worker threads,
+# because in-process locks don't span gunicorn's multiple workers and
+# gunicorn's own recycling/graceful-shutdown kills in-flight jobs cleanly
+# from nowhere.
+#
+# Secrets: ADMIN_PASSWORD_HASH, SESSION_SECRET, and CLAUDE_CODE_OAUTH_TOKEN
+# should be mounted as files (the *_FILE convention app.py reads) rather
+# than passed as plain env vars in production — the Portainer API on this
+# LAN has no auth, so stack env vars are readable by anyone who can reach
+# it. Uncomment the secrets block and point it at real files at deploy time.
+#
+# Port: bound with ports: to match every other app on this host (stats,
+# bareos-dash, tradingagents-web all do the same). The plan's stricter
+# recommendation — expose: on a network shared only with NPM, no host bind
+# at all — needs NPM's actual Docker network name confirmed at deploy time;
+# revisit this once that's known instead of guessing it here.
+
+x-app-common: &app-common
+  image: ghcr.io/jemplayer82/drafting-table:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATA_DIR: /data
+    MEDIA_DIR: /media
+  volumes:
+    - dt_data:/data
+    - dt_media:/media
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+
+services:
+  web:
+    <<: *app-common
+    command: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:8093 --timeout 60
+    ports:
+      - "8093:8093"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8093/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  worker:
+    <<: *app-common
+    command: python -m worker
+    pids_limit: 64
+
+volumes:
+  dt_data:
+  dt_media:

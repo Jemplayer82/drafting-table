@@ -1,0 +1,31 @@
+[project]
+name = "drafting-table"
+version = "0.1.0"
+description = "Self-hosted design mood board — drop a link, an agent analyzes and re-synthesizes"
+requires-python = ">=3.12"
+dependencies = [
+  "flask>=3.0",
+  "gunicorn>=22",
+  "httpx>=0.27",
+  "pillow>=10.4",
+  "beautifulsoup4>=4.12",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

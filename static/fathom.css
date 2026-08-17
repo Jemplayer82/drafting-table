@@ -1,0 +1,644 @@
+/* ---- from tokens/fonts.css ---- */
+/* ============================================================
+   Fathom Works — Webfonts
+   ------------------------------------------------------------
+   Two families carry the whole brand:
+
+   - JetBrains Mono  → the working font. UI, body, data, code.
+     Lifted verbatim from the owner's TradingAgents console, where
+     the entire dashboard is monospace. This is the native voice.
+
+   - Spectral        → the serif used for the FATHOM wordmark and
+     editorial display lines. SUBSTITUTE for the logo's Georgia —
+     a transitional serif with the same calm, nautical-chart
+     gravity that survives at large display sizes on the web.
+
+   SELF-HOSTED from ../fonts/ — no external requests, works
+   offline. Files are the Google Fonts latin subsets:
+
+   - jetbrains-mono-vf-latin.woff2  variable font, wght 100–800,
+     covers every --weight-* token in one file.
+   - spectral-{400,700}-latin.woff2 static; the site only sets
+     the serif at --weight-regular and --weight-bold. Spectral at
+     500/600 resolves to the nearest of these; italics render as
+     synthesized oblique. Pull more styles from
+     fonts.google.com/specimen/Spectral if that ever matters.
+
+   The unicode-ranges below mirror what Google served, so glyphs
+   outside latin (→ ≈ ● ▋ …) fall back to the system mono stack
+   exactly as they did when these loaded from fonts.googleapis.com.
+   ============================================================ */
+
+/* JetBrains Mono — variable, all weights */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('../fonts/jetbrains-mono-vf-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Spectral — regular */
+@font-face {
+  font-family: 'Spectral';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/spectral-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Spectral — bold */
+@font-face {
+  font-family: 'Spectral';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../fonts/spectral-700-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+
+/* ---- from tokens/colors.css ---- */
+/* ============================================================
+   Fathom Works — Color
+   ------------------------------------------------------------
+   The palette reads like a depth sounder at night: near-black
+   navy "depths" stacked from abyss to surface, a single SONAR
+   CYAN that does almost all the accenting, and a tight set of
+   signal colors (buy/hold/sell) carried over from the console.
+
+   Base tokens describe the raw color. Semantic aliases below
+   describe the JOB — reach for those in components.
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Depths: background stack, abyss → surface ---- */
+  --depth-1000: #030d14;  /* logo navy — deepest, hero fields */
+  --depth-900:  #060a0f;  /* abyss — inset wells, code, input bg */
+  --depth-800:  #0b0f14;  /* hull — app background */
+  --depth-700:  #07101a;  /* card — raised card on the app bg */
+  --depth-600:  #0f141b;  /* panel — bordered panel surface */
+  --depth-500:  #14202b;  /* shoal — hover / active fill */
+  --depth-400:  #041a24;  /* logo ink — alt deep navy */
+
+  /* ---- Lines & rules ---- */
+  --line:        #1d2a36;  /* panel borders, table rules, dividers */
+  --line-soft:   #0f1820;  /* dashed list separators */
+
+  /* ---- Foam: text stack ---- */
+  --foam-100: #eaf3fa;  /* brightest — display over deep navy */
+  --foam-200: #d6e1ea;  /* body text */
+  --foam-300: #cce8f4;  /* pale sonar tint — logo wordmark text */
+  --foam-500: #6b7d8f;  /* dim — labels, metadata, captions */
+
+  /* ---- Sonar: the one accent ---- */
+  --sonar-bright: #8be1ef;  /* hover state of sonar */
+  --sonar:        #6cd5e6;  /* primary accent — links, focus, active */
+  --sonar-deep:   #00b4d8;  /* logo cyan — denser sonar, on light */
+  --sonar-ink:    #04161b;  /* text/icon ON a filled sonar surface */
+  --sonar-wash:   rgba(108, 213, 230, 0.08);  /* tinted active fill */
+
+  /* ---- Signals: trading verdicts (uppercase by convention) ---- */
+  --buy:    #2ecc71;
+  --buy-2:  #7be38c;
+  --buy-ink:#042714;
+  --hold:   #f4c95d;
+  --hold-ink:#2e2204;
+  --sell:   #ff7c7c;
+  --sell-ink:#2e0a0a;
+
+  /* ---- Auxiliary accents (use sparingly) ---- */
+  --signal-magenta: #d57bff;  /* trader / emphasis <strong> */
+  --signal-amber:   #f0a040;  /* risk-aggressive */
+  --signal-slate:   #7aabf0;  /* risk-conservative */
+
+  /* ============================================================
+     Semantic aliases — prefer these in components
+     ============================================================ */
+
+  /* Surfaces */
+  --surface-app:      var(--depth-800);
+  --surface-panel:    var(--depth-600);
+  --surface-card:     var(--depth-700);
+  --surface-well:     var(--depth-900);
+  --surface-hover:    var(--depth-500);
+  --surface-hero:     var(--depth-1000);
+
+  /* Text */
+  --text-display:   var(--foam-100);
+  --text-body:      var(--foam-200);
+  --text-muted:     var(--foam-500);
+  --text-accent:    var(--sonar);
+  --text-on-accent: var(--sonar-ink);
+
+  /* Lines */
+  --border:        var(--line);
+  --border-accent: var(--sonar);
+  --divider:       var(--line-soft);
+
+  /* Interactive */
+  --focus-ring:    var(--sonar);
+  --link:          var(--sonar);
+}
+
+
+/* ---- from tokens/typography.css ---- */
+/* ============================================================
+   Fathom Works — Typography
+   ------------------------------------------------------------
+   Monospace-first. The mono is the working voice (everything in
+   the console is mono); the serif appears only for the wordmark
+   and the occasional editorial display line. No sans-serif —
+   keeping it to two families is part of the brand.
+   ============================================================ */
+
+:root {
+  /* ---- Families ---- */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Consolas, monospace;
+  --font-serif: 'Spectral', Georgia, 'Times New Roman', serif;
+
+  /* Aliases by job */
+  --font-body:    var(--font-mono);  /* body & UI — mono */
+  --font-data:    var(--font-mono);  /* numbers, tickers, code */
+  --font-display: var(--font-serif); /* wordmark & editorial heads */
+
+  /* ---- Type scale (px) — dense terminal rhythm ---- */
+  --text-2xs: 10px;   /* chips, micro-labels */
+  --text-xs:  11px;   /* uppercase labels, metadata */
+  --text-sm:  12px;   /* secondary UI, table cells */
+  --text-base:13px;   /* body — the console default */
+  --text-md:  15px;   /* emphasis figures, totals */
+  --text-lg:  18px;   /* prices, sub-heads */
+  --text-xl:  23px;   /* wordmark, panel display */
+  --text-2xl: 32px;   /* section heads */
+  --text-3xl: 46px;   /* page display */
+  --text-4xl: 64px;   /* hero serif */
+
+  /* ---- Weights ---- */
+  --weight-regular: 400;
+  --weight-medium:  500;
+  --weight-semibold:600;
+  --weight-bold:    700;
+  --weight-black:   800;
+
+  /* ---- Line heights ---- */
+  --leading-tight: 1.2;
+  --leading-snug:  1.35;
+  --leading-normal:1.5;   /* console body default */
+  --leading-relaxed:1.6;
+
+  /* ---- Letter-spacing ---- */
+  --tracking-tight:  -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide:   0.5px;   /* uppercase UI labels */
+  --tracking-wider:  0.6px;
+  --tracking-widest: 6px;     /* the FATHOM wordmark */
+}
+
+
+/* ---- from tokens/spacing.css ---- */
+/* ============================================================
+   Fathom Works — Spacing, Radius, Shadow, Motion
+   ------------------------------------------------------------
+   Tight and instrument-like. The console packs information, so
+   the spacing scale is small and the radii are barely-there
+   (3–6px) — hardware corners, not pillows. Shadows are used
+   almost never; depth comes from the navy stack + 1px borders.
+   ============================================================ */
+
+:root {
+  /* ---- Spacing scale ---- */
+  --space-0:  0;
+  --space-1:  2px;
+  --space-2:  4px;
+  --space-3:  6px;
+  --space-4:  8px;
+  --space-5:  10px;
+  --space-6:  12px;   /* default panel padding / grid gap */
+  --space-8:  16px;
+  --space-10: 22px;   /* panel top padding (clears the [ title ]) */
+  --space-12: 28px;
+  --space-16: 40px;
+  --space-20: 56px;
+
+  /* ---- Radius — hardware corners ---- */
+  --radius-xs: 2px;   /* chips, badges, code spans */
+  --radius-sm: 3px;   /* buttons, inputs, tabs */
+  --radius-md: 4px;   /* panels, cards */
+  --radius-lg: 6px;   /* dialogs, auth card */
+  --radius-pill: 999px;
+
+  /* ---- Borders ---- */
+  --border-width: 1px;
+  --border-dashed: 1px dashed var(--line);
+
+  /* ---- Shadow — depth is rare; reserve for overlays ---- */
+  --shadow-none: none;
+  --shadow-dropdown: 0 6px 18px rgba(0, 0, 0, 0.5);
+  --shadow-overlay:  0 12px 40px rgba(0, 0, 0, 0.6);
+  --glow-sonar: 0 0 0 1px var(--sonar), 0 0 12px rgba(108, 213, 230, 0.25);
+
+  /* ---- Motion — quick, mechanical, no bounce ---- */
+  --ease: cubic-bezier(0.2, 0, 0.2, 1); /* @kind other */
+  --dur-fast: 0.12s; /* @kind other */
+  --dur:      0.2s; /* @kind other */
+  --dur-slow: 0.3s; /* @kind other */
+
+  /* ---- Layout ---- */
+  --topbar-h: 41px;
+  --sidebar-w: 260px;
+  --content-max: 900px;
+}
+
+
+/* ---- from tokens/themes.css ---- */
+/* ============================================================
+   Fathom Works — Themes (registers)
+   ------------------------------------------------------------
+   The brand runs in two registers on ONE palette:
+
+   - default (:root)   → DARK "depths" / Terminal-Sonar.
+     The working register: the console, tools, dashboards.
+
+   - .theme-paper       → LIGHT "chart-paper" / Polished Paper.
+     The outward register: the marketing site, decks, client-
+     facing docs. Serif leads, lots of air, deep cyan accent.
+
+   .theme-paper only REMAPS the semantic aliases, so every
+   token-driven component (fc-*) reflows to light automatically.
+   Apply it on <body> (whole page) or any wrapper (a section).
+   ============================================================ */
+
+.theme-paper {
+  color-scheme: light;
+
+  /* ---- Paper depths (light surface stack) ---- */
+  --paper-mist:  #eef3f6;  /* page background */
+  --paper-card:  #ffffff;  /* cards / panels */
+  --paper-well:  #f5f8fa;  /* insets */
+  --paper-line:  #e2eaef;  /* hairline borders */
+  --ink-900:     #041a24;  /* logo ink — headlines */
+  --ink-700:     #1f3b48;  /* strong body */
+  --ink-500:     #3a5563;  /* body */
+  --ink-300:     #6f8694;  /* muted / labels */
+
+  /* ---- Surfaces ---- */
+  --surface-app:   var(--paper-mist);
+  --surface-panel: var(--paper-card);
+  --surface-card:  var(--paper-card);
+  --surface-well:  var(--paper-well);
+  --surface-hover: #e7eff4;
+  --surface-hero:  #ffffff;
+
+  /* ---- Text ---- */
+  --text-display:   var(--ink-900);
+  --text-body:      var(--ink-500);
+  --text-muted:     var(--ink-300);
+  --text-accent:    var(--sonar-deep);
+  --text-on-accent: #ffffff;
+
+  /* ---- Lines ---- */
+  --border:        var(--paper-line);
+  --border-accent: var(--sonar-deep);
+  --divider:       #eef2f5;
+
+  /* ---- Accent: remap sonar to the DEEP cyan (contrast on light) ---- */
+  --sonar:        #0077a8;
+  --sonar-bright: #0a93cb;
+  --sonar-ink:    #ffffff;
+  --sonar-wash:   rgba(0, 119, 168, 0.08);
+  --link:         #0077a8;
+
+  /* ---- Signal inks tuned for light chips ---- */
+  --buy:  #1f9d57;
+  --hold: #c98a16;
+  --sell: #d8504f;
+
+  background: var(--surface-app);
+  color: var(--text-body);
+}
+
+/* ---- Component nudges that only make sense on light ---- */
+.theme-paper .fc-btn--ghost { border-color: var(--paper-line); color: var(--ink-700); }
+.theme-paper .fc-btn--ghost:hover:not(:disabled) { border-color: var(--sonar); color: var(--sonar); }
+.theme-paper .fc-panel__title { background: var(--surface-app); }
+.theme-paper ::selection { background: var(--sonar-wash); color: var(--ink-900); }
+
+
+/* ---- from tokens/base.css ---- */
+/* ============================================================
+   Fathom Works — Base layer
+   ------------------------------------------------------------
+   Element defaults that establish the terminal surface. Kept
+   minimal so it composes cleanly into a consuming project.
+   ============================================================ */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface-app);
+  color: var(--text-body);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::selection { background: var(--sonar-wash); color: var(--foam-100); }
+
+/* Custom scrollbars — thin, instrument-like */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: var(--radius-pill); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- Brand wordmark helpers ------------------------------------
+   Use .fathom-wordmark for the typeset FATHOM WORKS lockup
+   when an SVG logo isn't appropriate. */
+.fathom-wordmark {
+  font-family: var(--font-serif);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-widest);
+  color: var(--foam-300);
+  line-height: 1;
+}
+.fathom-wordmark .sub {
+  display: block;
+  font-weight: var(--weight-regular);
+  font-size: 0.48em;
+  letter-spacing: var(--tracking-widest);
+  color: var(--sonar);
+  margin-top: 0.35em;
+}
+
+/* ---- The signature [ bracket label ] ---------------------------
+   The console wraps every panel title in brackets. This utility
+   reproduces it for ad-hoc headers. */
+.bracket-label::before { content: '[ '; }
+.bracket-label::after  { content: ' ]'; }
+.bracket-label {
+  color: var(--sonar);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  text-transform: lowercase;
+}
+
+/* ---- The $ shell prompt mark ----------------------------------- */
+.prompt-mark { color: var(--buy-2); }
+
+
+/* ---- from components/components.css ---- */
+/* ============================================================
+   Fathom Works — Component styles
+   ------------------------------------------------------------
+   Class-based styling for the React primitives, lifted from the
+   TradingAgents console vocabulary. Shipped to consumers via
+   styles.css, so the classes work with or without the bundle.
+   Prefix: fc-
+   ============================================================ */
+
+/* ---- Button ------------------------------------------------ */
+.fc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-body);
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.fc-btn--primary {
+  background: var(--sonar);
+  color: var(--sonar-ink);
+  border-color: var(--sonar);
+  font-weight: var(--weight-semibold);
+}
+.fc-btn--primary:hover:not(:disabled) { background: var(--sonar-bright); border-color: var(--sonar-bright); }
+.fc-btn--ghost:hover:not(:disabled)   { border-color: var(--hold); color: var(--hold); }
+.fc-btn--danger { border-color: var(--sell); color: var(--sell); }
+.fc-btn--danger:hover:not(:disabled)  { background: rgba(255,124,124,0.1); }
+.fc-btn--sm { padding: 4px 10px; font-size: var(--text-xs); }
+.fc-btn--lg { padding: 10px 18px; font-size: var(--text-md); }
+.fc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.fc-btn:focus-visible { outline: none; box-shadow: var(--glow-sonar); }
+
+/* ---- Panel ------------------------------------------------- */
+.fc-panel {
+  position: relative;
+  border: 1px solid var(--line);
+  background: var(--surface-panel);
+  border-radius: var(--radius-md);
+  padding: var(--space-10) var(--space-6) var(--space-6);
+}
+.fc-panel--accent { border-color: var(--sonar); }
+.fc-panel--glow { box-shadow: var(--glow-sonar); }
+.fc-panel__title {
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  background: var(--surface-app);
+  padding: 0 6px;
+  color: var(--sonar);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- Signal badge ------------------------------------------ */
+.fc-badge {
+  display: inline-block;
+  text-transform: uppercase;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--line);
+  color: var(--text-body);
+}
+.fc-badge--lg { font-size: var(--text-lg); padding: 6px 14px; }
+.fc-badge--BUY     { background: var(--buy);  color: var(--buy-ink); }
+.fc-badge--SELL    { background: var(--sell); color: var(--sell-ink); }
+.fc-badge--HOLD    { background: var(--hold); color: var(--hold-ink); }
+.fc-badge--UNKNOWN { background: var(--line); color: var(--text-muted); }
+.fc-badge--OPTION  { background: transparent; border: 1px solid var(--line); color: var(--text-muted); }
+
+/* ---- Conviction badge -------------------------------------- */
+.fc-conviction {
+  display: inline-block;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--line);
+  color: var(--text-body);
+}
+.fc-conviction--high { background: var(--buy);  color: var(--buy-ink); }
+.fc-conviction--mid  { background: var(--hold); color: var(--hold-ink); }
+.fc-conviction--low  { background: var(--sell); color: var(--sell-ink); }
+
+/* ---- Tabs -------------------------------------------------- */
+.fc-tabstrip { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.fc-tab {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wider);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.fc-tab:hover { color: var(--text-body); border-color: var(--sonar); }
+.fc-tab--active {
+  color: var(--sonar);
+  border-color: var(--sonar);
+  background: var(--sonar-wash);
+}
+.fc-tab--sm { padding: 4px 10px; font-size: var(--text-xs); }
+
+/* ---- Field (label + input/select) -------------------------- */
+.fc-field { display: flex; flex-direction: column; gap: var(--space-2); }
+.fc-field__label {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+.fc-input, .fc-select {
+  background: var(--surface-well);
+  color: var(--text-body);
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  border-radius: var(--radius-sm);
+  outline: none;
+  width: 100%;
+  transition: border-color var(--dur) var(--ease);
+}
+.fc-input::placeholder { color: var(--text-muted); }
+.fc-input:focus, .fc-select:focus { border-color: var(--sonar); }
+.fc-input:disabled, .fc-select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Progress row (agent state) ---------------------------- */
+.fc-progress-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+  font-size: var(--text-sm);
+}
+.fc-progress-row__name { color: var(--text-body); }
+.fc-progress-row__state {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+.fc-progress-row__state--pending     { color: var(--text-muted); }
+.fc-progress-row__state--in_progress { color: var(--hold); }
+.fc-progress-row__state--completed   { color: var(--buy-2); }
+
+/* ---- Stat (totals item) ------------------------------------ */
+.fc-stat { display: flex; flex-direction: column; gap: var(--space-1); }
+.fc-stat__label {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+.fc-stat__value { font-size: var(--text-md); font-weight: var(--weight-semibold); color: var(--text-body); }
+.fc-stat__value--up   { color: var(--buy-2); }
+.fc-stat__value--down { color: var(--sell); }
+.fc-stat__value--accent { color: var(--sonar); }
+
+/* ---- History item (sidebar) -------------------------------- */
+.fc-history-item {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.fc-history-item:hover { background: var(--surface-card); border-color: var(--line); }
+.fc-history-item--active { background: var(--surface-hover); border-color: var(--sonar); }
+.fc-history-item__main { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; min-width: 0; }
+.fc-history-item__top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.fc-history-item__tk { font-weight: var(--weight-semibold); color: var(--sonar); }
+.fc-history-item__ts { color: var(--text-muted); font-size: var(--text-xs); }
+
+/* ---- Footer banner ----------------------------------------- */
+/* A slim brand sign-off for the bottom of a page, deck, or doc.
+   Token-driven, so it reflows to .theme-paper automatically:
+   navy hero + foam type on dark, white + ink on light. */
+.fc-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-8);
+  background: var(--surface-hero);
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+}
+.fc-footer__brand {
+  font-family: var(--font-serif);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-widest);
+  color: var(--text-display);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  /* widest tracking adds trailing space; pull the kerning back */
+  margin-right: calc(var(--tracking-widest) * -1);
+}
+.fc-footer__sep { color: var(--text-accent); }
+.fc-footer__tag {
+  color: var(--text-muted);
+  letter-spacing: var(--tracking-wide);
+}
+.fc-footer__mark { height: 20px; width: auto; display: block; align-self: center; flex: none; }
+.fc-footer__meta {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+}
+/* Split layout — brand left, meta right (console / app chrome) */
+.fc-footer--split { justify-content: space-between; align-items: center; }
+.fc-footer__lead { display: inline-flex; align-items: center; gap: var(--space-4); }
+
+/* ---- Connection dot ---------------------------------------- */
+.fc-dot { font-size: var(--text-2xs); vertical-align: middle; }
+.fc-dot--live { color: var(--buy-2); }
+.fc-dot--warn { color: var(--hold); }
+.fc-dot--down { color: var(--sell); }
+.fc-dot--idle { color: var(--text-muted); }
