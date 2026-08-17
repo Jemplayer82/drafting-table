@@ -237,3 +237,9 @@ def test_project_page_example_project_renders_decisions(logged_in_client):
     resp = logged_in_client.get("/p/studio-portfolio-site")
     assert resp.status_code == 200
     assert b"Type" in resp.data
+
+    # The example project has exactly 2 note items, both without thumbnails.
+    item_blocks = re.findall(rb'class="dt-item"', resp.data)
+    assert len(item_blocks) == 2
+    assert b'dt-item__media' not in resp.data
+    assert b'/media/' not in resp.data
