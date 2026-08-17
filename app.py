@@ -199,6 +199,7 @@ def media(mid):  # noqa: ANN001, ANN201
     ext = _MEDIA_EXT_BY_MIME.get(row["mime"], "bin")
     resp = Response(media_path.read_bytes(), mimetype=row["mime"])
     resp.headers["Content-Disposition"] = f'inline; filename="media.{ext}"'
+    resp.headers["Cache-Control"] = "private, no-store"
     return resp
 
 
