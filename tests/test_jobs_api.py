@@ -168,6 +168,29 @@ def test_status_returns_expected_shape_and_only_queued_and_running_jobs(logged_i
         assert j["phase"] == f"phase-{j['status']}"
 
 
+def test_status_serializes_null_phase_for_real_ingest_job(logged_in_client):
+    project_id, slug = db.create_project("Null Phase API", None)
+    item_id, job_id = db.create_note_and_ingest_job(project_id, "fresh note")
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT phase, status FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+
+    assert row["status"] == "queued"
+    assert row["phase"] is None
+
+    resp = logged_in_client.get(f"/api/projects/{project_id}/status")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    job_payloads = {j["id"]: j for j in data["jobs"]}
+    assert job_payloads[job_id]["status"] == "queued"
+    assert job_payloads[job_id]["kind"] == "ingest"
+    assert job_payloads[job_id]["phase"] is None
+
+
 def test_status_has_cache_control_no_store(logged_in_client):
     project_id, slug = db.create_project("Cache Test", None)
     resp = logged_in_client.get(f"/api/projects/{project_id}/status")
@@ -241,3 +264,24 @@ def test_project_page_renders_job_status_badge(logged_in_client):
     assert b'data-job-status="running"' in resp.data
     assert f'data-job-id="{job_id}"'.encode() in resp.data
     assert b"analyze" in resp.data
+
+
+def test_project_page_renders_status_fallback_when_phase_is_null(logged_in_client):
+    project_id, slug = db.create_project("Null Phase UI", None)
+    item_id, job_id = db.create_note_and_ingest_job(project_id, "pending note")
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT phase, status FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+
+    assert row["status"] == "queued"
+    assert row["phase"] is None
+
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    assert b'data-job-status="queued"' in resp.data
+    assert f'data-job-id="{job_id}"'.encode() in resp.data
+    assert b">queued&hellip;</span>" in resp.data
+    assert b">None<" not in resp.data
