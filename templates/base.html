@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}drafting table{% endblock %}</title>
+  <link rel="stylesheet" href="/static/fathom.css">
+  <link rel="stylesheet" href="/static/drafting-table.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+  <header class="dt-topbar">
+    <div class="dt-topbar__brand">
+      <span class="dt-topbar__wordmark"><span class="prompt-mark">$</span> drafting table</span>
+      {% block crumb %}{% endblock %}
+    </div>
+    <div class="dt-topbar__status">
+      <span class="fc-dot" id="statusDot">&#9679;</span>
+      <span id="statusLabel">idle</span>
+      {% if g.get('session') %}
+      <form method="post" action="/logout" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+        <button class="fc-btn fc-btn--ghost fc-btn--sm" type="submit">logout</button>
+      </form>
+      {% endif %}
+    </div>
+  </header>
+
+  {% block content %}{% endblock %}
+
+  <footer class="fc-footer fc-footer--split">
+    <span class="fc-footer__lead">
+      <span class="fc-footer__brand">FATHOM WORKS</span>
+      <span class="fc-footer__sep">&#183;</span>
+      <span class="fc-footer__tag">sound the depths before you set a course</span>
+    </span>
+    <span class="fc-footer__meta">drafting table &#183; flask &#183; sqlite</span>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+
+</body>
+</html>

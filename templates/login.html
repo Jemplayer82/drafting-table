@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — drafting table</title>
+  <link rel="stylesheet" href="/static/fathom.css">
+  <link rel="stylesheet" href="/static/drafting-table.css">
+</head>
+<body style="margin:0;padding:0;">
+
+<div class="dt-auth-page">
+
+  <div class="dt-auth-rings" aria-hidden="true">
+    <div class="dt-auth-ring"></div>
+    <div class="dt-auth-ring"></div>
+    <div class="dt-auth-ring"></div>
+  </div>
+
+  <div class="dt-auth-inner">
+
+    <div class="dt-auth-brand">
+      <div class="dt-auth-headline">
+        <span class="prompt-mark">$</span> <span style="color:var(--foam-100);">drafting table</span>
+      </div>
+      <div class="dt-auth-sub">DESIGN BOARD &#183; SELF-HOSTED</div>
+    </div>
+
+    <div class="fc-panel" style="width:100%;">
+      <span class="fc-panel__title">[ login ]</span>
+
+      <form method="post" action="/login">
+        <div class="fc-field" style="margin-bottom:13px;">
+          <label class="fc-field__label" for="username">Username</label>
+          <input class="fc-input" type="text" id="username" name="username"
+                 autocomplete="username" required autofocus>
+        </div>
+        <div class="fc-field" style="margin-bottom:18px;">
+          <label class="fc-field__label" for="password">Password</label>
+          <input class="fc-input" type="password" id="password" name="password"
+                 autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="fc-btn fc-btn--primary w-100">Log in</button>
+      </form>
+
+      {% if error %}
+      <div class="dt-alert dt-alert--danger">! {{ error }}</div>
+      {% endif %}
+
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>
