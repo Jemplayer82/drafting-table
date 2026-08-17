@@ -49,6 +49,7 @@ app = Flask(__name__)
 _PUBLIC_PATHS = {"/login", "/healthz"}
 _MEDIA_ID_RE = re.compile(r"[0-9a-f]{32}")
 _HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")
+_URL_SHAPED_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _MEDIA_EXT_BY_MIME = {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png"}
 _ITEM_EDIT_FIELDS = db.ITEM_USER_EDITABLE - {"position"}
 
@@ -288,7 +289,10 @@ def item_drop(project_id):
         return _render_project(slug, item_error="A note is required.")
     elif len(raw_text) > 20000:
         return _render_project(slug, item_error="Note text must be under 20000 characters.")
-    item_id, _job_id = db.create_note_and_ingest_job(project_id, raw_text)
+    if _URL_SHAPED_RE.fullmatch(raw_text):
+        item_id, _job_id = db.create_url_and_ingest_job(project_id, raw_text)
+    else:
+        item_id, _job_id = db.create_note_and_ingest_job(project_id, raw_text)
     return redirect(f"/p/{slug}#item-{item_id}")
 
 

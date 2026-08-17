@@ -190,6 +190,19 @@ def test_non_http_scheme_rejected(url: str) -> None:
         net_guard.resolve_public_target(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[::1/x",
+        "http://[gg::1]/img.jpg",
+        "http://[1::2::3]/x",
+    ],
+)
+def test_malformed_ipv6_url_rejected(url: str) -> None:
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.resolve_public_target(url)
+
+
 def test_credentials_in_url_rejected() -> None:
     with pytest.raises(net_guard.SSRFRejected):
         net_guard.resolve_public_target("http://user:pass@example.com/")

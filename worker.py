@@ -113,7 +113,10 @@ def _try_fetch_thumbnail(html_body: bytes, base_url: str) -> dict:
     image_url = _parse_page(html_body)[1]
     if not image_url:
         return {}
-    absolute_url = urljoin(base_url, image_url)
+    try:
+        absolute_url = urljoin(base_url, image_url)
+    except ValueError:
+        return {}
     try:
         img_result = net_guard.fetch(absolute_url)
     except net_guard.NetGuardError:

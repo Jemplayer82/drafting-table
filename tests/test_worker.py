@@ -134,6 +134,16 @@ def _make_jpeg_bytes() -> bytes:
 _TEST_JPEG = _make_jpeg_bytes()
 
 
+def _make_large_jpeg_bytes() -> bytes:
+    img = Image.new("RGB", (2000, 1400), color=(120, 180, 220))
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+_TEST_LARGE_JPEG = _make_large_jpeg_bytes()
+
+
 class _PageWithOgImageHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/page":
@@ -150,7 +160,7 @@ class _PageWithOgImageHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.end_headers()
-            self.wfile.write(_TEST_JPEG)
+            self.wfile.write(_TEST_LARGE_JPEG)
         else:
             self.send_response(404)
             self.end_headers()
@@ -200,6 +210,21 @@ class _PageWithPrivateOgImageHandler(http.server.BaseHTTPRequestHandler):
         body = (
             b"<html><head><title>Private Image Page</title>"
             b'<meta property="og:image" content="http://192.168.1.1/evil.png"></head></html>'
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _PageWithMalformedOgImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = (
+            b"<html><head><title>Malformed Image Page</title>"
+            b'<meta property="og:image" content="http://[::1/x"></head></html>'
         )
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -596,8 +621,8 @@ def test_run_ingest_job_url_kind_extracts_title_and_thumbnail_from_og_image(
         assert item["title"] == "Cool Reference"
         assert item["media_id"] is not None
         assert item["thumb_media_id"] is not None
-        assert item["thumb_w"] > 0
-        assert item["thumb_h"] > 0
+        assert item["thumb_w"] == 640
+        assert item["thumb_h"] == 448
 
         thumb_row = conn.execute(
             "SELECT * FROM media WHERE id = ?",
@@ -605,6 +630,15 @@ def test_run_ingest_job_url_kind_extracts_title_and_thumbnail_from_og_image(
         ).fetchone()
         assert thumb_row["mime"] == "image/webp"
         assert (db.MEDIA_DIR / thumb_row["path"]).exists()
+
+        full_row = conn.execute(
+            "SELECT * FROM media WHERE id = ?",
+            (item["media_id"],),
+        ).fetchone()
+        assert full_row["mime"] == "image/jpeg"
+        assert full_row["width"] == 1600
+        assert full_row["height"] == 1120
+        assert (db.MEDIA_DIR / full_row["path"]).exists()
 
         chained = conn.execute(
             """
@@ -708,6 +742,41 @@ def test_run_ingest_job_url_kind_bad_og_image_bytes_skips_thumbnail_without_fail
         item = db.get_item(item_id)
         assert item["status"] == "ready"
         assert item["title"] == "Broken Image Page"
+        assert item["media_id"] is None
+        assert item["thumb_media_id"] is None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_malformed_og_image_url_still_succeeds_without_thumbnail(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-malformed-og", "")
+        base_url = local_http_server(_PageWithMalformedOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Malformed Image Page"
         assert item["media_id"] is None
         assert item["thumb_media_id"] is None
 

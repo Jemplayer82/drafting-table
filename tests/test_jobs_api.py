@@ -44,11 +44,11 @@ def test_drop_creates_item_and_job_and_redirects_to_item_anchor(logged_in_client
     project_id, slug = db.create_project("Drop Test", None)
     resp = logged_in_client.get(f"/p/{slug}")
     assert resp.status_code == 200
-    token = _csrf_token(resp.data)
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
 
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/drop",
-        data={"raw_text": "Hello note", "csrf_token": token},
+        data={"raw_text": "Hello note", "csrf_token": token},  # pragma: allowlist secret
         follow_redirects=False,
     )
     assert resp.status_code == 302
@@ -83,11 +83,11 @@ def test_drop_creates_item_and_job_and_redirects_to_item_anchor(logged_in_client
 def test_drop_on_nonexistent_project_404s(logged_in_client):
     project_id, slug = db.create_project("Token Source", None)
     resp = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(resp.data)
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
 
     resp = logged_in_client.post(
         "/api/projects/9999/drop",
-        data={"raw_text": "note", "csrf_token": token},
+        data={"raw_text": "note", "csrf_token": token},  # pragma: allowlist secret
         follow_redirects=False,
     )
     assert resp.status_code == 404
@@ -99,12 +99,12 @@ def test_drop_on_archived_project_404s_and_creates_nothing(logged_in_client):
     _archive_project(archived_id)
 
     resp = logged_in_client.get(f"/p/{active_slug}")
-    token = _csrf_token(resp.data)
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
 
     before = _counts(archived_id)
     resp = logged_in_client.post(
         f"/api/projects/{archived_id}/drop",
-        data={"raw_text": "note", "csrf_token": token},
+        data={"raw_text": "note", "csrf_token": token},  # pragma: allowlist secret
         follow_redirects=False,
     )
     assert resp.status_code == 404
@@ -124,12 +124,12 @@ def test_drop_without_csrf_token_is_rejected(logged_in_client):
 def test_drop_empty_raw_text_rerenders_with_error_and_creates_nothing(logged_in_client):
     project_id, slug = db.create_project("Empty Drop", None)
     resp = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(resp.data)
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
 
     before_items, before_jobs = _counts(project_id)
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/drop",
-        data={"raw_text": "   ", "csrf_token": token},
+        data={"raw_text": "   ", "csrf_token": token},  # pragma: allowlist secret
         follow_redirects=False,
     )
     assert resp.status_code == 200
@@ -285,3 +285,134 @@ def test_project_page_renders_status_fallback_when_phase_is_null(logged_in_clien
     assert f'data-job-id="{job_id}"'.encode() in resp.data
     assert b">queued&hellip;</span>" in resp.data
     assert b">None<" not in resp.data
+
+
+def test_drop_url_shaped_raw_text_creates_url_kind_item_with_source_url(logged_in_client):
+    project_id, slug = db.create_project("URL Drop", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/drop",
+        data={  # pragma: allowlist secret
+            "raw_text": "https://example.com/some/path",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT * FROM items WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert item is not None
+    assert item["kind"] == "url"
+    assert item["source_url"] == "https://example.com/some/path"
+    assert item["raw_text"] is None
+    assert item["status"] == "pending"
+
+    with db.connect() as conn:
+        job = conn.execute(
+            "SELECT * FROM jobs WHERE item_id = ? AND project_id = ?",
+            (item["id"], project_id),
+        ).fetchone()
+    assert job is not None
+    assert job["kind"] == "ingest"
+    assert job["status"] == "queued"
+
+
+def test_drop_url_shaped_case_insensitive_scheme_still_detected(logged_in_client):
+    project_id, slug = db.create_project("URL Case", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/drop",
+        data={"raw_text": "HTTPS://Example.com/x", "csrf_token": token},  # pragma: allowlist secret
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT kind FROM items WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert item is not None
+    assert item["kind"] == "url"
+
+
+def test_drop_plain_text_mentioning_a_url_is_still_a_note(logged_in_client):
+    project_id, slug = db.create_project("Text With URL", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
+    submitted = "check out http://example.com for ideas"
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/drop",
+        data={"raw_text": submitted, "csrf_token": token},  # pragma: allowlist secret
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT kind, raw_text FROM items WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert item is not None
+    assert item["kind"] == "note"
+    assert item["raw_text"] == submitted
+
+
+def test_drop_multiline_text_with_url_on_first_line_is_still_a_note(logged_in_client):
+    project_id, slug = db.create_project("Multiline URL", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
+    submitted = "https://example.com/x\nsecond line of text"
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/drop",
+        data={"raw_text": submitted, "csrf_token": token},  # pragma: allowlist secret
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT kind FROM items WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert item is not None
+    assert item["kind"] == "note"
+
+
+def test_drop_plain_note_still_creates_note_kind_item(logged_in_client):
+    project_id, slug = db.create_project("Plain Note", None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    token = _csrf_token(resp.data)  # pragma: allowlist secret
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/drop",
+        data={  # pragma: allowlist secret
+            "raw_text": "just a plain note, not a url",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT kind FROM items WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    assert item is not None
+    assert item["kind"] == "note"

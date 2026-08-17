@@ -9,7 +9,7 @@ import ipaddress
 import socket
 import threading
 import time
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -176,7 +176,10 @@ def resolve_public_target(url: str) -> ResolvedTarget:
     the original hostname for the HTTP Host header / TLS SNI.  The DNS lookup
     itself is capped by _DNS_RESOLUTION_TIMEOUT so it cannot stall the worker.
     """
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise SSRFRejected("Invalid URL") from exc
 
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise SSRFRejected("Only http and https URLs are allowed")
