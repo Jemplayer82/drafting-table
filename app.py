@@ -329,34 +329,47 @@ def _render_project(
         ).fetchone()
         if proj is None:
             return None
-        items = conn.execute(
-            "SELECT id, kind, status, source_url, title, tag, note_md, alt_text, "
-            "thumb_media_id, thumb_w, thumb_h, position FROM items "
-            "WHERE project_id = ? ORDER BY position, id",
-            (proj["id"],),
-        ).fetchall()
-        swatch_rows = []
-        if items:
-            item_ids = [i["id"] for i in items]
-            placeholders = ",".join("?" * len(item_ids))
-            swatch_rows = conn.execute(
-                f"SELECT item_id, hex, label FROM swatches WHERE item_id IN ({placeholders}) "
-                "ORDER BY item_id, position",
-                item_ids,
+        # Read items, swatches, synthesis, decisions, and the live-jobs-by-item
+        # mapping in one explicit read transaction on this connection (plain BEGIN,
+        # not BEGIN IMMEDIATE -- read-only, so no need to grab a write lock and
+        # contend with the worker process). Both db.py and app.py use
+        # isolation_level=None (autocommit), so without this, jobs_by_item running
+        # after this block closed would land on a separate connection with no shared
+        # read snapshot -- a job/item could transition between the two reads and the
+        # page would render a stale, self-correcting-but-wrong "still queued" state.
+        conn.execute("BEGIN")
+        try:
+            items = conn.execute(
+                "SELECT id, kind, status, source_url, title, tag, note_md, alt_text, "
+                "thumb_media_id, thumb_w, thumb_h, position FROM items "
+                "WHERE project_id = ? ORDER BY position, id",
+                (proj["id"],),
             ).fetchall()
-        synthesis = conn.execute(
-            "SELECT direction_md, questions_json FROM syntheses "
-            "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-            (proj["id"],),
-        ).fetchone()
-        decision_rows = conn.execute(
-            "SELECT id, body_md, rationale_md FROM decisions "
-            "WHERE project_id = ? AND status = 'accepted' AND superseded_by IS NULL "
-            "ORDER BY created_at",
-            (proj["id"],),
-        ).fetchall()
-
-    jobs_by_item = db.live_jobs_by_item(proj["id"])
+            swatch_rows = []
+            if items:
+                item_ids = [i["id"] for i in items]
+                placeholders = ",".join("?" * len(item_ids))
+                swatch_rows = conn.execute(
+                    f"SELECT item_id, hex, label FROM swatches WHERE item_id IN ({placeholders}) "
+                    "ORDER BY item_id, position",
+                    item_ids,
+                ).fetchall()
+            synthesis = conn.execute(
+                "SELECT direction_md, questions_json FROM syntheses "
+                "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                (proj["id"],),
+            ).fetchone()
+            decision_rows = conn.execute(
+                "SELECT id, body_md, rationale_md FROM decisions "
+                "WHERE project_id = ? AND status = 'accepted' AND superseded_by IS NULL "
+                "ORDER BY created_at",
+                (proj["id"],),
+            ).fetchall()
+            jobs_by_item = db.live_jobs_by_item(proj["id"], conn=conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     swatches_by_item = {}
     for row in swatch_rows:

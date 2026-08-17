@@ -631,11 +631,19 @@ def latest_synthesis_version(project_id: int) -> int:
     return row["v"] or 0
 
 
-def live_jobs_by_item(project_id: int) -> dict[int, sqlite3.Row]:
+def live_jobs_by_item(
+    project_id: int, conn: sqlite3.Connection | None = None
+) -> dict[int, sqlite3.Row]:
     """Maps each project item that has a queued/running job to its live job row.
-    Jobs with item_id=NULL (e.g. resynthesize jobs) are excluded."""
-    with connect() as conn:
-        rows = conn.execute(
+    Jobs with item_id=NULL (e.g. resynthesize jobs) are excluded. If conn is given,
+    the query runs on that connection instead of opening a new one -- the caller owns
+    that connection's lifecycle/transaction, which lets this be read alongside other
+    project state (e.g. _render_project's items query) from one consistent snapshot
+    instead of a separate autocommit connection. Defaults to opening its own connection
+    (matching the previous behavior) when conn is None."""
+
+    def _fetch(c: sqlite3.Connection) -> dict[int, sqlite3.Row]:
+        rows = c.execute(
             """
             SELECT id, item_id, status, phase
             FROM jobs
@@ -644,4 +652,9 @@ def live_jobs_by_item(project_id: int) -> dict[int, sqlite3.Row]:
             """,
             (project_id,),
         ).fetchall()
-    return {row["item_id"]: row for row in rows}
+        return {row["item_id"]: row for row in rows}
+
+    if conn is not None:
+        return _fetch(conn)
+    with connect() as conn:
+        return _fetch(conn)
