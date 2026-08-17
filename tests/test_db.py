@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import importlib
+
 
 def test_init_db_is_idempotent(app_env):
     import db
 
+    importlib.reload(db)
     db.init_db()
     db.init_db()  # must not raise on a second boot
 
@@ -22,6 +25,7 @@ def test_init_db_is_idempotent(app_env):
 def test_init_db_creates_media_dir(app_env):
     import db
 
+    importlib.reload(db)
     db.init_db()
     assert db.MEDIA_DIR.is_dir()
 
@@ -29,6 +33,7 @@ def test_init_db_creates_media_dir(app_env):
 def test_update_item_rejects_non_allowlisted_columns(app_env):
     import db
 
+    importlib.reload(db)
     db.init_db()
     try:
         db.update_item(1, source_url_injected="'; DROP TABLE items; --")
