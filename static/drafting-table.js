@@ -18,12 +18,27 @@ document.addEventListener("submit", (e) => {
   if (!page) return;
   const projectId = page.dataset.projectId;
   const badgeJobIds = new Set([...badges].map((b) => b.dataset.jobId).filter(Boolean));
+
+  const MAX_FAILURES = 3;
+  let failures = 0;
+
   const timer = setInterval(() => {
     fetch(`/api/projects/${projectId}/status`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
+        failures = 0;
         const stillActive = data.jobs.some((j) => badgeJobIds.has(String(j.id)));
         if (!stillActive) {
+          clearInterval(timer);
+          location.reload();
+        }
+      })
+      .catch(() => {
+        failures += 1;
+        if (failures >= MAX_FAILURES) {
           clearInterval(timer);
           location.reload();
         }
