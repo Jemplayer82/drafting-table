@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import contextlib
 import http.server
 import ipaddress
 import socket
+import time
 from urllib.parse import urlsplit
 
 import pytest
@@ -63,37 +63,33 @@ class OversizedHandler(_QuietBaseHTTPRequestHandler):
         self.wfile.write(b"x" * 3_000_000)
 
 
-@contextlib.contextmanager
-def _serve(local_http_server, handler):
-    value = local_http_server(handler)
-    if hasattr(value, "__enter__"):
-        with value as yielded:
-            yield _unpack(yielded)
-    else:
-        yield _unpack(value)
+class SlowHandler(_QuietBaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/slow":
+            time.sleep(0.5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"slow response")
+        else:
+            self.send_error(404)
 
 
-def _unpack(value):
-    if isinstance(value, str):
-        base_url = value
-        port = urlsplit(base_url).port
-        if port is None:
-            port = 80
-        return base_url, port
-    base_url, port = value
-    return base_url, port
-
-
-@contextlib.contextmanager
-def _allow(guard_allow_loopback, port):
-    result = guard_allow_loopback(port)
-    if result is None:
-        yield
-    elif hasattr(result, "__enter__"):
-        with result:
-            yield
-    else:
-        yield
+class SlowRedirectHandler(_QuietBaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/slow-redirect":
+            time.sleep(0.3)
+            self.send_response(302)
+            self.send_header("Location", "/slow-final")
+            self.end_headers()
+        elif self.path == "/slow-final":
+            time.sleep(0.3)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"slow final destination")
+        else:
+            self.send_error(404)
 
 
 def test_rfc1918_rejected() -> None:
@@ -292,55 +288,75 @@ def test_ipv6_literal_url_round_trips() -> None:
 def test_fetch_returns_response_for_valid_local_target(
     local_http_server, guard_allow_loopback
 ) -> None:
-    with _serve(local_http_server, OkHandler) as (base_url, port), _allow(
-        guard_allow_loopback, port
-    ):
-        result = net_guard.fetch(base_url + "/ok")
-        assert result.status_code == 200
-        assert result.body == b"hello from net_guard"
-        assert result.final_url == base_url + "/ok"
+    base_url = local_http_server(OkHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    result = net_guard.fetch(base_url + "/ok")
+    assert result.status_code == 200
+    assert result.body == b"hello from net_guard"
+    assert result.final_url == base_url + "/ok"
 
 
 def test_fetch_follows_redirect_within_limit_and_returns_final_body(
     local_http_server, guard_allow_loopback
 ) -> None:
-    with _serve(local_http_server, RedirectOnceHandler) as (base_url, port), _allow(
-        guard_allow_loopback, port
-    ):
-        result = net_guard.fetch(base_url + "/redirect-once")
-        assert result.status_code == 200
-        assert result.body == b"final destination"
-        assert result.final_url == base_url + "/final"
+    base_url = local_http_server(RedirectOnceHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    result = net_guard.fetch(base_url + "/redirect-once")
+    assert result.status_code == 200
+    assert result.body == b"final destination"
+    assert result.final_url == base_url + "/final"
 
 
 def test_fetch_rejects_redirect_chain_longer_than_max_redirects(
     local_http_server, guard_allow_loopback
 ) -> None:
-    with _serve(local_http_server, SelfRedirectHandler) as (base_url, port), _allow(
-        guard_allow_loopback, port
-    ):
-        with pytest.raises(net_guard.FetchError):
-            net_guard.fetch(base_url + "/next", max_redirects=2)
+    base_url = local_http_server(SelfRedirectHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.FetchError):
+        net_guard.fetch(base_url + "/next", max_redirects=2)
 
 
 def test_fetch_rejects_redirect_to_private_ip(
     local_http_server, guard_allow_loopback
 ) -> None:
-    with _serve(local_http_server, RedirectPrivateHandler) as (base_url, port), _allow(
-        guard_allow_loopback, port
-    ):
-        with pytest.raises(net_guard.SSRFRejected):
-            net_guard.fetch(base_url + "/redirect-private")
+    base_url = local_http_server(RedirectPrivateHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.SSRFRejected):
+        net_guard.fetch(base_url + "/redirect-private")
 
 
 def test_fetch_rejects_body_larger_than_max_bytes(
     local_http_server, guard_allow_loopback
 ) -> None:
-    with _serve(local_http_server, OversizedHandler) as (base_url, port), _allow(
-        guard_allow_loopback, port
-    ):
-        with pytest.raises(net_guard.FetchError):
-            net_guard.fetch(base_url + "/big", max_bytes=1000)
+    base_url = local_http_server(OversizedHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.FetchError):
+        net_guard.fetch(base_url + "/big", max_bytes=1000)
+
+
+def test_fetch_raises_fetch_error_when_wall_clock_timeout_exceeded(
+    local_http_server, guard_allow_loopback
+) -> None:
+    base_url = local_http_server(SlowHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.FetchError):
+        net_guard.fetch(base_url + "/slow", timeout=0.1)
+
+
+def test_fetch_threads_remaining_timeout_across_redirects(
+    local_http_server, guard_allow_loopback
+) -> None:
+    base_url = local_http_server(SlowRedirectHandler)
+    port = urlsplit(base_url).port
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.FetchError):
+        net_guard.fetch(base_url + "/slow-redirect", timeout=0.4)
 
 
 def test_fetch_wraps_connection_refused_as_fetch_error(guard_allow_loopback) -> None:
@@ -348,6 +364,6 @@ def test_fetch_wraps_connection_refused_as_fetch_error(guard_allow_loopback) -> 
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    with _allow(guard_allow_loopback, port):
-        with pytest.raises(net_guard.FetchError):
-            net_guard.fetch(f"http://127.0.0.1:{port}/")
+    guard_allow_loopback(port)
+    with pytest.raises(net_guard.FetchError):
+        net_guard.fetch(f"http://127.0.0.1:{port}/")
