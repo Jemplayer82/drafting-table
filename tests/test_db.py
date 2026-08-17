@@ -377,3 +377,43 @@ def test_supersede_decision_wrong_project_returns_none(app_env):
     assert row["project_id"] == pid_a
     assert row["body_md"] == "Use blue"
     assert row["superseded_by"] is None
+
+
+def test_supersede_decision_already_superseded_returns_none(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Double Supersede", None)
+    original_id = db.insert_decision(pid, "Use blue", "**Type:** because")
+    first_new_id = db.supersede_decision(original_id, pid, "Use green", "**Type:** changed")
+
+    assert first_new_id is not None
+
+    # Simulate a double-click / back-button resubmit: try to supersede the same
+    # already-superseded original decision again.
+    second_new_id = db.supersede_decision(original_id, pid, "Use red", "**Type:** changed again")
+    assert second_new_id is None
+
+    with db.connect() as conn:
+        original = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (original_id,)
+        ).fetchone()
+        first_new = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (first_new_id,)
+        ).fetchone()
+        decision_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions WHERE project_id = ?", (pid,)
+        ).fetchone()["n"]
+
+    # The original row still points to the first superseding row.
+    assert original["superseded_by"] == first_new_id
+
+    # The first superseding row is unchanged and remains the unique current row.
+    assert first_new["superseded_by"] is None
+    assert first_new["body_md"] == "Use green"
+    assert first_new["rationale_md"] == "**Type:** changed"
+    assert first_new["status"] == "accepted"
+
+    # No competing row was created.
+    assert decision_count == 2

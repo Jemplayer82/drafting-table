@@ -388,14 +388,17 @@ def supersede_decision(
     and UPDATEs the OLD row to set superseded_by to the new row's id -- NEVER UPDATEs
     body_md/rationale_md/status/created_at/decided_at on the old row. Both statements
     run in one transaction. project_id scopes the lookup as a defense-in-depth check
-    (the old row must belong to that project). Returns the new row's id, or None (no
-    changes made) if decision_id doesn't exist or doesn't belong to project_id."""
+    (the old row must belong to that project), and the old row must still be the
+    current/live decision in its chain (status='accepted' and superseded_by IS NULL).
+    Returns the new row's id, or None (no changes made) if decision_id doesn't exist,
+    doesn't belong to project_id, or has already been superseded."""
     now = _now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             old = conn.execute(
-                "SELECT id FROM decisions WHERE id = ? AND project_id = ?",
+                "SELECT id FROM decisions WHERE id = ? AND project_id = ? "
+                "AND status = 'accepted' AND superseded_by IS NULL",
                 (decision_id, project_id),
             ).fetchone()
             if old is None:
