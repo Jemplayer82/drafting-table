@@ -9,11 +9,29 @@
     <span class="dt-rule__meta">{{ projects|length }} BOARD{{ 'S' if projects|length != 1 else '' }}</span>
   </div>
 
+  {% if error %}
+  <div class="dt-alert dt-alert--danger">! {{ error }}</div>
+  {% endif %}
+
   <div class="dt-boards">
-    <a class="dt-board dt-board--new" href="#" data-action="new-project">
-      <span class="dt-board--new__plus">+</span>
-      <span>new project</span>
-    </a>
+    <div class="dt-board dt-board--new">
+      <button type="button" class="dt-board--new__trigger" data-toggle="new-project-form">
+        <span class="dt-board--new__plus">+</span>
+        <span>new project</span>
+      </button>
+      <form method="post" action="/projects" id="new-project-form" class="dt-board--new__form d-none">
+        <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+        <div class="fc-field">
+          <label class="fc-field__label" for="new-project-name">Name</label>
+          <input class="fc-input" type="text" id="new-project-name" name="name" maxlength="200" required>
+        </div>
+        <div class="fc-field">
+          <label class="fc-field__label" for="new-project-note">Note (optional)</label>
+          <textarea class="fc-input" id="new-project-note" name="note" rows="2"></textarea>
+        </div>
+        <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm w-100">Create</button>
+      </form>
+    </div>
 
     {% for p in projects %}
     <a class="dt-board" href="/p/{{ p.slug }}">

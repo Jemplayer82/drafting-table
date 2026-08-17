@@ -167,8 +167,7 @@ def logout():  # noqa: ANN201
     return resp
 
 
-@app.route("/")
-def board():  # noqa: ANN201
+def _board_context() -> tuple[list, dict]:
     with db.connect() as conn:
         projects = conn.execute(
             "SELECT id, name, slug FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC"
@@ -182,7 +181,33 @@ def board():  # noqa: ANN201
             ).fetchone()
             if cover:
                 covers[p["id"]] = cover["thumb_media_id"]
-    return render_template("board.html", projects=projects, covers=covers, nonce=g.csp_nonce)
+    return projects, covers
+
+
+@app.route("/")
+def board():  # noqa: ANN201
+    projects, covers = _board_context()
+    return render_template(
+        "board.html", projects=projects, covers=covers, nonce=g.csp_nonce, error=None
+    )
+
+
+@app.route("/projects", methods=["POST"])
+def new_project():  # noqa: ANN201
+    name = request.form.get("name", "").strip()
+    note = request.form.get("note", "").strip() or None
+    error = None
+    if not name:
+        error = "Project name is required."
+    elif len(name) > 200:
+        error = "Project name must be under 200 characters."
+    if error:
+        projects, covers = _board_context()
+        return render_template(
+            "board.html", projects=projects, covers=covers, nonce=g.csp_nonce, error=error
+        )
+    _, slug = db.create_project(name, note)
+    return redirect(f"/p/{slug}", code=303)
 
 
 @app.route("/media/<mid>")

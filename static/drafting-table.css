@@ -95,6 +95,8 @@ body { margin: 0; background: var(--surface-app); color: var(--text-body); font-
 }
 .dt-board--new:hover { border-color: var(--sonar); color: var(--sonar); }
 .dt-board--new__plus { font-size: 28px; line-height: 1; }
+.dt-board--new__trigger { all: unset; display: contents; cursor: pointer; }
+.dt-board--new__form { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 0 16px 16px; }
 
 /* ---- Auth page (login) ------------------------------------------ */
 .dt-auth-page {
