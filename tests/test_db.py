@@ -245,6 +245,78 @@ def test_replace_swatches_replaces_all(app_env):
     assert rows[0]["label"] == "b"
 
 
+def test_replace_swatches_clears_all_with_empty_list(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Swatch Clear Test", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#ff0000", "red", 0),
+        )
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#00ff00", "green", 1),
+        )
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#0000ff", "blue", 2),
+        )
+
+    db.replace_swatches(item_id, [])
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ? ORDER BY position",
+            (item_id,),
+        ).fetchall()
+    assert len(rows) == 0
+
+
+def test_replace_swatches_shrinks_to_fewer_swatches(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Swatch Shrink Test", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#ff0000", "red", 0),
+        )
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#00ff00", "green", 1),
+        )
+        conn.execute(
+            "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+            (item_id, "#0000ff", "blue", 2),
+        )
+
+    db.replace_swatches(
+        item_id,
+        [
+            {"hex": "#111111", "label": "one"},
+            {"hex": "#222222", "label": "two"},
+        ],
+    )
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ? ORDER BY position",
+            (item_id,),
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["hex"] == "#111111"
+    assert rows[0]["label"] == "one"
+    assert rows[1]["hex"] == "#222222"
+    assert rows[1]["label"] == "two"
+
+
 def test_insert_decision_creates_accepted_user_row(app_env):
     import db
 
