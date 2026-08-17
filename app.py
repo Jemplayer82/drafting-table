@@ -286,6 +286,8 @@ def item_drop(project_id):
     raw_text = request.form.get("raw_text", "").strip()
     if not raw_text:
         return _render_project(slug, item_error="A note is required.")
+    elif len(raw_text) > 20000:
+        return _render_project(slug, item_error="Note text must be under 20000 characters.")
     item_id, _job_id = db.create_note_and_ingest_job(project_id, raw_text)
     return redirect(f"/p/{slug}#item-{item_id}")
 
