@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 import secrets
 
@@ -24,13 +22,32 @@ def _project_id_slug(slug: str) -> tuple[int, str]:
     return row["id"], row["slug"]
 
 
+def _insert_item(project_id: int, title: str | None = None) -> int:
+    now = db._now()
+    with db.connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO items (project_id, kind, status, position, media_id, "
+            "thumb_media_id, created_at, updated_at, title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (project_id, "test", "todo", 0, None, None, now, now, title),
+        )
+        return cur.lastrowid
+
+
+def _archive_project(project_id: int) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE projects SET archived_at = ? WHERE id = ?",
+            (db._now(), project_id),
+        )
+
+
 def test_create_project_redirects_to_new_slug_and_appears_on_board(logged_in_client):
     name = f"CRUD New Project {secrets.token_hex(4)}"
     board = logged_in_client.get("/")
-    token = _csrf_token(board.data)
-
+    token = _csrf_token(board.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
-        "/projects", data={"name": name, "csrf_token": token}
+        "/projects", data={"name": name, "csrf_token": token}  # pragma: allowlist secret
     )
     assert resp.status_code == 303
     location = resp.headers["Location"]
@@ -52,16 +69,15 @@ def test_create_project_redirects_to_new_slug_and_appears_on_board(logged_in_cli
 def test_create_project_slug_collision_appends_suffix(logged_in_client):
     name = f"CRUD Collision {secrets.token_hex(4)}"
     board = logged_in_client.get("/")
-    token = _csrf_token(board.data)
-
+    token = _csrf_token(board.data)  # pragma: allowlist secret
     resp1 = logged_in_client.post(
-        "/projects", data={"name": name, "csrf_token": token}
+        "/projects", data={"name": name, "csrf_token": token}  # pragma: allowlist secret
     )
     assert resp1.status_code == 303
     slug1 = resp1.headers["Location"][len("/p/") :]
 
     resp2 = logged_in_client.post(
-        "/projects", data={"name": name, "csrf_token": token}
+        "/projects", data={"name": name, "csrf_token": token}  # pragma: allowlist secret
     )
     assert resp2.status_code == 303
     slug2 = resp2.headers["Location"][len("/p/") :]
@@ -76,10 +92,9 @@ def test_create_project_slug_collision_appends_suffix(logged_in_client):
 
 def test_create_project_empty_name_rerenders_board_with_error(logged_in_client):
     board = logged_in_client.get("/")
-    token = _csrf_token(board.data)
-
+    token = _csrf_token(board.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
-        "/projects", data={"name": "", "csrf_token": token}
+        "/projects", data={"name": "", "csrf_token": token}  # pragma: allowlist secret
     )
     assert resp.status_code == 200
     assert b"dt-alert--danger" in resp.data
@@ -116,8 +131,7 @@ def test_item_edit_updates_title_tag_note_and_persists_on_reload(logged_in_clien
     new_note = f"Updated note body {secrets.token_hex(4)}"
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     data = MultiDict(
         [
             ("title", new_title),
@@ -180,8 +194,7 @@ def test_item_edit_rejects_invalid_swatch_hex_and_leaves_existing_swatches_untou
     slug = item["slug"]
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     data = MultiDict(
         [
             ("title", f"Bad Swatch {secrets.token_hex(4)}"),
@@ -206,6 +219,60 @@ def test_item_edit_rejects_invalid_swatch_hex_and_leaves_existing_swatches_untou
             (item_id,),
         ).fetchall()
     assert [dict(r) for r in after] == [dict(r) for r in snapshot]
+
+
+def test_item_edit_nonexistent_item_returns_404(logged_in_client):
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    with db.connect() as conn:
+        item_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM items"
+        ).fetchone()[0]
+
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/edit",
+        data={
+            "title": f"Should not apply {secrets.token_hex(4)}",
+            "tag": "no-op",
+            "note_md": "no-op",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_item_edit_archived_project_item_returns_404_and_leaves_item_untouched(
+    logged_in_client,
+):
+    project_id, _ = db.create_project(
+        f"Archived Edit Project {secrets.token_hex(4)}", None
+    )
+    item_id = _insert_item(project_id, title="Original title")
+    _archive_project(project_id)
+
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/edit",
+        data={
+            "title": f"Changed title {secrets.token_hex(4)}",
+            "tag": "changed-tag",
+            "note_md": "changed note",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT title, tag, note_md, position FROM items WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+
+    assert row["title"] == "Original title"
+    assert row["tag"] is None
+    assert row["note_md"] is None
+    assert row["position"] == 0
 
 
 def test_item_delete_removes_item_and_swatches_and_survives_missing_file(
@@ -233,10 +300,9 @@ def test_item_delete_removes_item_and_swatches_and_survives_missing_file(
     (db.MEDIA_DIR / media_path).unlink()
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
-        f"/api/items/{item_id}/delete", data={"csrf_token": token}
+        f"/api/items/{item_id}/delete", data={"csrf_token": token}  # pragma: allowlist secret
     )
     assert resp.status_code == 302
 
@@ -257,6 +323,46 @@ def test_item_delete_removes_item_and_swatches_and_survives_missing_file(
         )
 
 
+def test_item_delete_nonexistent_item_returns_404(logged_in_client):
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    with db.connect() as conn:
+        item_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM items"
+        ).fetchone()[0]
+
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/delete", data={"csrf_token": token}  # pragma: allowlist secret
+    )
+    assert resp.status_code == 404
+
+
+def test_item_delete_archived_project_item_returns_404_and_leaves_item_untouched(
+    logged_in_client,
+):
+    project_id, _ = db.create_project(
+        f"Archived Delete Project {secrets.token_hex(4)}", None
+    )
+    item_id = _insert_item(project_id, title="Item to keep")
+    _archive_project(project_id)
+
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/delete", data={"csrf_token": token}  # pragma: allowlist secret
+    )
+    assert resp.status_code == 404
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, title, position FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+
+    assert row is not None
+    assert row["title"] == "Item to keep"
+    assert row["position"] == 0
+
+
 def test_item_move_swaps_positions(logged_in_client):
     with db.connect() as conn:
         proj = conn.execute(
@@ -275,11 +381,10 @@ def test_item_move_swaps_positions(logged_in_client):
     slug = proj["slug"]
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/items/{first_id}/move",
-        data={"direction": "down", "csrf_token": token},
+        data={"direction": "down", "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 302
 
@@ -319,11 +424,10 @@ def test_item_move_tie_position_swaps_order(logged_in_client):
         )
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/items/{first_id}/move",
-        data={"direction": "down", "csrf_token": token},
+        data={"direction": "down", "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 302
 
@@ -350,13 +454,53 @@ def test_item_move_invalid_direction_returns_400(logged_in_client):
         ).fetchone()
 
     page = logged_in_client.get("/")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/items/{item['id']}/move",
-        data={"direction": "sideways", "csrf_token": token},
+        data={"direction": "sideways", "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 400
+
+
+def test_item_move_nonexistent_item_returns_404(logged_in_client):
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    with db.connect() as conn:
+        item_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM items"
+        ).fetchone()[0]
+
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/move",
+        data={"direction": "down", "csrf_token": token},  # pragma: allowlist secret
+    )
+    assert resp.status_code == 404
+
+
+def test_item_move_archived_project_item_returns_404_and_leaves_item_untouched(
+    logged_in_client,
+):
+    project_id, _ = db.create_project(
+        f"Archived Move Project {secrets.token_hex(4)}", None
+    )
+    item_id = _insert_item(project_id)
+    _archive_project(project_id)
+
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    resp = logged_in_client.post(
+        f"/api/items/{item_id}/move",
+        data={"direction": "down", "csrf_token": token},  # pragma: allowlist secret
+    )
+    assert resp.status_code == 404
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, position FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+
+    assert row is not None
+    assert row["position"] == 0
 
 
 def test_item_edit_without_csrf_token_is_rejected(logged_in_client):
@@ -410,14 +554,13 @@ def test_add_decision_inserts_accepted_row(logged_in_client):
     project_id, slug = _project_id_slug("jemplayer82-web-design-ideas")
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     body = f"Decision body {secrets.token_hex(4)}"
     rationale = f"Rationale {secrets.token_hex(4)}"
 
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/decisions",
-        data={"body_md": body, "rationale_md": rationale, "csrf_token": token},
+        data={"body_md": body, "rationale_md": rationale, "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 302
     assert resp.headers["Location"] == f"/p/{slug}"
@@ -463,11 +606,10 @@ def test_edit_decision_creates_new_row_and_supersedes_old_without_mutating_it(
     new_rationale = f"Updated rationale {secrets.token_hex(4)}"
 
     page = logged_in_client.get(f"/p/{proj['slug']}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/projects/{proj['id']}/decisions/{old_id}/edit",
-        data={"body_md": new_body, "rationale_md": new_rationale, "csrf_token": token},
+        data={"body_md": new_body, "rationale_md": new_rationale, "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 302
 
@@ -498,14 +640,60 @@ def test_add_decision_empty_body_rerenders_with_error(logged_in_client):
     project_id, slug = _project_id_slug("jemplayer82-web-design-ideas")
 
     page = logged_in_client.get(f"/p/{slug}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     resp = logged_in_client.post(
         f"/api/projects/{project_id}/decisions",
-        data={"body_md": "", "rationale_md": "rationale", "csrf_token": token},
+        data={"body_md": "", "rationale_md": "rationale", "csrf_token": token},  # pragma: allowlist secret
     )
     assert resp.status_code == 200
     assert b"dt-alert--danger" in resp.data
+
+
+def test_decision_create_nonexistent_project_returns_404(logged_in_client):
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    with db.connect() as conn:
+        project_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM projects"
+        ).fetchone()[0]
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/decisions",
+        data={
+            "body_md": f"Body {secrets.token_hex(4)}",
+            "rationale_md": f"Rationale {secrets.token_hex(4)}",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_decision_create_archived_project_returns_404_and_leaves_decisions_untouched(
+    logged_in_client,
+):
+    project_id, _ = db.create_project(
+        f"Archived Decision Project {secrets.token_hex(4)}", None
+    )
+    _archive_project(project_id)
+
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/decisions",
+        data={
+            "body_md": f"Body {secrets.token_hex(4)}",
+            "rationale_md": f"Rationale {secrets.token_hex(4)}",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+    with db.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM decisions WHERE project_id = ?", (project_id,)
+        ).fetchone()[0]
+
+    assert count == 0
 
 
 def test_decision_create_without_csrf_token_is_rejected(logged_in_client):
@@ -546,8 +734,7 @@ def test_decision_edit_cross_project_returns_404_and_leaves_row_untouched(
     decision_id = db.insert_decision(pid_a, original_body, None)
 
     page = logged_in_client.get(f"/p/{slug_a}")
-    token = _csrf_token(page.data)
-
+    token = _csrf_token(page.data)  # pragma: allowlist secret
     new_body = f"Updated decision {secrets.token_hex(4)}"
     new_rationale = f"Updated rationale {secrets.token_hex(4)}"
 
@@ -556,7 +743,7 @@ def test_decision_edit_cross_project_returns_404_and_leaves_row_untouched(
         data={
             "body_md": new_body,
             "rationale_md": new_rationale,
-            "csrf_token": token,
+            "csrf_token": token,  # pragma: allowlist secret
         },
     )
     assert resp.status_code == 404
@@ -569,4 +756,58 @@ def test_decision_edit_cross_project_returns_404_and_leaves_row_untouched(
 
     assert row["project_id"] == pid_a
     assert row["body_md"] == original_body
+    assert row["superseded_by"] is None
+
+
+def test_decision_edit_nonexistent_project_returns_404(logged_in_client):
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    with db.connect() as conn:
+        project_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM projects"
+        ).fetchone()[0]
+
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/decisions/1/edit",
+        data={
+            "body_md": f"Body {secrets.token_hex(4)}",
+            "rationale_md": f"Rationale {secrets.token_hex(4)}",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_decision_edit_archived_project_returns_404_and_leaves_decision_untouched(
+    logged_in_client,
+):
+    project_id, _ = db.create_project(
+        f"Archived Decision Edit Project {secrets.token_hex(4)}", None
+    )
+    original_body = f"Original body {secrets.token_hex(4)}"
+    original_rationale = f"Original rationale {secrets.token_hex(4)}"
+    decision_id = db.insert_decision(project_id, original_body, original_rationale)
+    _archive_project(project_id)
+
+    board = logged_in_client.get("/")
+    token = _csrf_token(board.data)  # pragma: allowlist secret
+    resp = logged_in_client.post(
+        f"/api/projects/{project_id}/decisions/{decision_id}/edit",
+        data={
+            "body_md": f"Changed body {secrets.token_hex(4)}",
+            "rationale_md": f"Changed rationale {secrets.token_hex(4)}",
+            "csrf_token": token,  # pragma: allowlist secret
+        },
+    )
+    assert resp.status_code == 404
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT body_md, rationale_md, superseded_by FROM decisions "
+            "WHERE id = ?",
+            (decision_id,),
+        ).fetchone()
+
+    assert row["body_md"] == original_body
+    assert row["rationale_md"] == original_rationale
     assert row["superseded_by"] is None
