@@ -7,11 +7,18 @@ Flask or app.py.
 from __future__ import annotations
 
 import datetime
+import http.server
 import importlib
+import ipaddress
+import socket as socket_module
+from io import BytesIO
+from urllib.parse import urlsplit
 
 import pytest
+from PIL import Image
 
 import db
+import net_guard
 import worker
 
 
@@ -115,6 +122,103 @@ def _run_ingest_and_get_item(
     job = db.claim_next_job(worker_id)
     worker.run_ingest_job(job, sleep=_noop_sleep)
     return db.get_item(item_id)
+
+
+def _make_jpeg_bytes() -> bytes:
+    img = Image.new("RGB", (300, 200), color=(120, 180, 220))
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+_TEST_JPEG = _make_jpeg_bytes()
+
+
+class _PageWithOgImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/page":
+            body = (
+                b"<html><head><title>Cool Reference</title>"
+                b'<meta property="og:image" content="/img.jpg"></head>'
+                b"<body></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/img.jpg":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.end_headers()
+            self.wfile.write(_TEST_JPEG)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+class _PageWithoutOgImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"<html><head><title>No Image Here</title></head><body></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _PageWithBadOgImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/page":
+            body = (
+                b"<html><head><title>Broken Image Page</title>"
+                b'<meta property="og:image" content="/not-image.bin"></head></html>'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/not-image.bin":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"not actually an image")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+class _PageWithPrivateOgImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = (
+            b"<html><head><title>Private Image Page</title>"
+            b'<meta property="og:image" content="http://192.168.1.1/evil.png"></head></html>'
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _NotFoundHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"not found")
+
+    def log_message(self, *a):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -466,3 +570,265 @@ def test_run_ingest_job_truncates_long_first_line_to_eighty_chars_plus_ellipsis(
         assert item["status"] == "ready"
         assert item["title"] == "a" * 80 + "..."
         assert len(item["title"]) == 83
+
+
+def test_run_ingest_job_url_kind_extracts_title_and_thumbnail_from_og_image(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-og", "")
+        base_url = local_http_server(_PageWithOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Cool Reference"
+        assert item["media_id"] is not None
+        assert item["thumb_media_id"] is not None
+        assert item["thumb_w"] > 0
+        assert item["thumb_h"] > 0
+
+        thumb_row = conn.execute(
+            "SELECT * FROM media WHERE id = ?",
+            (item["thumb_media_id"],),
+        ).fetchone()
+        assert thumb_row["mime"] == "image/webp"
+        assert (db.MEDIA_DIR / thumb_row["path"]).exists()
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_succeeds_without_thumbnail_when_no_og_image(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-no-og", "")
+        base_url = local_http_server(_PageWithoutOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "No Image Here"
+        assert item["media_id"] is None
+        assert item["thumb_media_id"] is None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_og_image_pointing_at_private_ip_still_succeeds_without_thumbnail(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-private-og", "")
+        base_url = local_http_server(_PageWithPrivateOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Private Image Page"
+        assert item["media_id"] is None
+        assert item["thumb_media_id"] is None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_bad_og_image_bytes_skips_thumbnail_without_failing(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-bad-og", "")
+        base_url = local_http_server(_PageWithBadOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Broken Image Page"
+        assert item["media_id"] is None
+        assert item["thumb_media_id"] is None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_non_2xx_status_fails_with_status_code_and_no_chain(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-404", "")
+        base_url = local_http_server(_NotFoundHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/missing"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert "404" in item["error"]
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_url_kind_private_ip_fails_generic_and_does_not_chain():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-private-ip", "")
+        source_url = "http://192.168.1.1/whatever"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "could not fetch that url"
+        lowered = item["error"].lower()
+        for leaked in ("192.168", "private", "forbidden", "ssrf"):
+            assert leaked not in lowered
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_url_kind_connection_error_fails_generic_and_does_not_chain(
+    monkeypatch,
+):
+    s = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    unused_port = s.getsockname()[1]
+    s.close()
+
+    monkeypatch.setattr(
+        net_guard,
+        "resolve_public_target",
+        lambda _url: net_guard.ResolvedTarget(
+            ip=ipaddress.IPv4Address("127.0.0.1"),
+            host="127.0.0.1",
+            port=unused_port,
+            scheme="http",
+            path_qs="/",
+        ),
+    )
+
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-conn-error", "")
+        source_url = "http://example.com/placeholder"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "could not fetch that url"
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
