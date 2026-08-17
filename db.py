@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -205,3 +206,188 @@ def _now() -> str:
     import datetime
 
     return datetime.datetime.now(datetime.UTC).isoformat()
+
+
+def _slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def create_project(name: str, note: str | None) -> tuple[int, str]:
+    """Inserts a project, generating a unique slug from name. On a UNIQUE-constraint
+    collision on projects.slug, retries the INSERT with -2, -3, ... suffixes -- a
+    retry-against-the-DB loop, not check-then-insert, to avoid a race between two
+    concurrent creates with the same name. Returns (new project id, final slug)."""
+    base = _slugify(name) or "project"
+    now = _now()
+    candidate = base
+    suffix = 1
+    with connect() as conn:
+        while True:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO projects (name, slug, note, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (name, candidate, note, now, now),
+                )
+                return cur.lastrowid, candidate
+            except sqlite3.IntegrityError:
+                suffix += 1
+                candidate = f"{base}-{suffix}"
+
+
+def move_item(item_id: int, direction: str) -> bool:
+    """Swaps this item's position with its immediate neighbor's (next-lower position
+    for 'up', next-higher for 'down') within the same project, tie-broken by id to
+    match project_detail()'s own 'ORDER BY position, id' rendering order. Runs in one
+    transaction. Returns True if a swap happened, False if item_id doesn't exist or
+    has no neighbor in that direction (already first/last). Raises ValueError if
+    direction isn't 'up'/'down'."""
+    if direction not in ("up", "down"):
+        raise ValueError("direction must be 'up' or 'down'")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT project_id, position FROM items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return False
+            if direction == "up":
+                neighbor = conn.execute(
+                    "SELECT id, position FROM items WHERE project_id = ? AND "
+                    "(position < ? OR (position = ? AND id < ?)) "
+                    "ORDER BY position DESC, id DESC LIMIT 1",
+                    (row["project_id"], row["position"], row["position"], item_id),
+                ).fetchone()
+            else:
+                neighbor = conn.execute(
+                    "SELECT id, position FROM items WHERE project_id = ? AND "
+                    "(position > ? OR (position = ? AND id > ?)) "
+                    "ORDER BY position ASC, id ASC LIMIT 1",
+                    (row["project_id"], row["position"], row["position"], item_id),
+                ).fetchone()
+            if neighbor is None:
+                conn.execute("ROLLBACK")
+                return False
+            now = _now()
+            conn.execute(
+                "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
+                (neighbor["position"], now, item_id),
+            )
+            conn.execute(
+                "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
+                (row["position"], now, neighbor["id"]),
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def delete_item(item_id: int) -> list[str]:
+    """Deletes the item row (swatches cascade automatically via the existing ON
+    DELETE CASCADE FK, since connect() sets PRAGMA foreign_keys=ON) and its media
+    rows (media_id / thumb_media_id are TEXT ids into the media table, NOT declared
+    as FKs in the schema, so they must be deleted explicitly here). Returns the
+    media.path values that existed, for the caller to unlink from disk under
+    db.MEDIA_DIR -- this function only ever touches the DB, never the filesystem.
+    Returns [] if item_id doesn't exist. Runs in one transaction."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT media_id, thumb_media_id FROM items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return []
+            media_ids = [m for m in (row["media_id"], row["thumb_media_id"]) if m]
+            paths = []
+            for mid in media_ids:
+                mrow = conn.execute("SELECT path FROM media WHERE id = ?", (mid,)).fetchone()
+                if mrow:
+                    paths.append(mrow["path"])
+            conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            if media_ids:
+                placeholders = ",".join("?" * len(media_ids))
+                conn.execute(f"DELETE FROM media WHERE id IN ({placeholders})", media_ids)
+            conn.execute("COMMIT")
+            return paths
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def replace_swatches(item_id: int, swatches: list[dict]) -> None:
+    """Replaces ALL swatches for item_id: DELETE existing rows then INSERT the given
+    ones, in one transaction (swatches are agent-derived/re-derivable, unlike
+    decisions -- full replace is intentional and safe, per the plan doc). Each dict
+    needs 'hex' (str) and optionally 'label' (str or None); position is assigned by
+    list order (0-indexed). Caller must validate hex format before calling -- this
+    function does not."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM swatches WHERE item_id = ?", (item_id,))
+            for i, sw in enumerate(swatches):
+                conn.execute(
+                    "INSERT INTO swatches (item_id, hex, label, position) VALUES (?, ?, ?, ?)",
+                    (item_id, sw["hex"], sw.get("label"), i),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def insert_decision(project_id: int, body_md: str, rationale_md: str | None) -> int:
+    """Inserts a new decisions row: source='user', status='accepted', decided_at=now.
+    superseded_by and job_id are left NULL (both nullable, no DEFAULT needed).
+    Single-statement write, atomic under connect()'s autocommit mode -- no explicit
+    transaction needed. Returns the new row's id."""
+    now = _now()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "created_at, decided_at) VALUES (?, ?, ?, 'user', 'accepted', ?, ?)",
+            (project_id, body_md, rationale_md, now, now),
+        )
+        return cur.lastrowid
+
+
+def supersede_decision(
+    decision_id: int, project_id: int, body_md: str, rationale_md: str | None
+) -> int | None:
+    """Append-only edit: INSERTs a new decisions row (source='user', status='accepted')
+    and UPDATEs the OLD row to set superseded_by to the new row's id -- NEVER UPDATEs
+    body_md/rationale_md/status/created_at/decided_at on the old row. Both statements
+    run in one transaction. project_id scopes the lookup as a defense-in-depth check
+    (the old row must belong to that project). Returns the new row's id, or None (no
+    changes made) if decision_id doesn't exist or doesn't belong to project_id."""
+    now = _now()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            old = conn.execute(
+                "SELECT id FROM decisions WHERE id = ? AND project_id = ?",
+                (decision_id, project_id),
+            ).fetchone()
+            if old is None:
+                conn.execute("ROLLBACK")
+                return None
+            cur = conn.execute(
+                "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+                "created_at, decided_at) VALUES (?, ?, ?, 'user', 'accepted', ?, ?)",
+                (project_id, body_md, rationale_md, now, now),
+            )
+            new_id = cur.lastrowid
+            conn.execute(
+                "UPDATE decisions SET superseded_by = ? WHERE id = ?", (new_id, decision_id)
+            )
+            conn.execute("COMMIT")
+            return new_id
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
