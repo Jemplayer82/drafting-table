@@ -94,6 +94,31 @@ def _insert_item(conn, project_id, db, position=0, media_id=None, thumb_media_id
     return cur.lastrowid
 
 
+def _insert_job(
+    conn,
+    project_id,
+    db,
+    kind="ingest",
+    status="queued",
+    created_at=None,
+    item_id=None,
+):
+    if created_at is None:
+        created_at = db._now()
+    cur = conn.execute(
+        "INSERT INTO jobs (project_id, kind, status, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (project_id, kind, status, created_at),
+    )
+    job_id = cur.lastrowid
+    if item_id is not None:
+        conn.execute(
+            "UPDATE jobs SET item_id = ? WHERE id = ?",
+            (item_id, job_id),
+        )
+    return job_id
+
+
 def test_move_item_swaps_positions(app_env):
     import db
 
@@ -495,3 +520,429 @@ def test_supersede_decision_already_superseded_returns_none(app_env):
 
     # No competing row was created.
     assert decision_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Job-pipeline SQL layer tests
+# ---------------------------------------------------------------------------
+
+
+def test_claim_next_job_returns_none_when_queue_empty(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    assert db.claim_next_job("w1") is None
+
+
+def test_claim_next_job_claims_oldest_queued_job_first(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Claim Oldest", None)
+    with db.connect() as conn:
+        older_id = _insert_job(
+            conn, pid, db, created_at="2024-01-01T00:00:00+00:00"
+        )
+        _insert_job(conn, pid, db, created_at="2024-01-02T00:00:00+00:00")
+
+    row = db.claim_next_job("w1")
+    assert row is not None
+    assert row["id"] == older_id
+    assert row["status"] == "running"
+    assert row["worker_id"] == "w1"
+    assert row["started_at"] is not None
+    assert row["heartbeat_at"] is not None
+
+
+def test_claim_next_job_race_second_caller_gets_none(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Race", None)
+    with db.connect() as conn:
+        job_id = _insert_job(conn, pid, db)
+
+    row1 = db.claim_next_job("w1")
+    assert row1 is not None
+    assert row1["id"] == job_id
+
+    row2 = db.claim_next_job("w2")
+    assert row2 is None
+
+
+def test_set_job_phase_updates_phase_and_heartbeat(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Phase", None)
+    with db.connect() as conn:
+        job_id = _insert_job(conn, pid, db)
+        conn.execute(
+            "UPDATE jobs SET heartbeat_at = '2024-01-01T00:00:00+00:00' WHERE id = ?",
+            (job_id,),
+        )
+
+    db.set_job_phase(job_id, "parsing")
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT phase, heartbeat_at FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert row["phase"] == "parsing"
+    assert row["heartbeat_at"] != "2024-01-01T00:00:00+00:00"
+
+
+def test_complete_ingest_job_marks_item_ready_and_job_done(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.complete_ingest_job(job_id, item_id, "My Title")
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "My Title"
+    assert item["updated_at"] is not None
+    assert job["status"] == "done"
+    assert job["finished_at"] is not None
+    assert job["heartbeat_at"] is not None
+
+
+def test_complete_job_marks_job_done_without_touching_items_or_syntheses(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Job", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(conn, pid, db, status="running")
+        conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "created_at) VALUES (?, 1, 'dir', '[]', ?)",
+            (pid, db._now()),
+        )
+
+    db.complete_job(job_id)
+
+    with db.connect() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        item = conn.execute(
+            "SELECT status FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        synth_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM syntheses WHERE project_id = ?", (pid,)
+        ).fetchone()["n"]
+    assert job["status"] == "done"
+    assert job["finished_at"] is not None
+    assert item["status"] == "todo"
+    assert synth_count == 1
+
+
+def test_chain_resynthesize_job_debounces_across_three_calls(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Resynth Debounce", None)
+
+    db.chain_resynthesize_job(pid)
+    db.chain_resynthesize_job(pid)
+    db.chain_resynthesize_job(pid)
+
+    with db.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()["n"]
+    assert count == 1
+
+
+def test_chain_resynthesize_job_debounces_against_running_not_just_queued(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Resynth Running", None)
+    with db.connect() as conn:
+        _insert_job(conn, pid, db, kind="resynthesize", status="running")
+
+    db.chain_resynthesize_job(pid)
+
+    with db.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()["n"]
+    assert count == 1
+
+
+def test_chain_resynthesize_job_inserts_fresh_after_prior_done(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Resynth Fresh", None)
+    with db.connect() as conn:
+        _insert_job(conn, pid, db, kind="resynthesize", status="done")
+
+    db.chain_resynthesize_job(pid)
+
+    with db.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()["n"]
+    assert count == 2
+
+
+def test_fail_job_with_item_id_marks_both_job_and_item_failed(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Fail Both", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_id
+        )
+
+    db.fail_job(job_id, item_id, "boom")
+
+    with db.connect() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert job["status"] == "failed"
+    assert job["error"] == "boom"
+    assert job["finished_at"] is not None
+    assert item["status"] == "failed"
+    assert item["error"] == "boom"
+    assert item["updated_at"] is not None
+
+
+def test_fail_job_with_none_item_id_only_touches_job(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Fail Job Only", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(
+            conn, pid, db, kind="resynthesize", status="running"
+        )
+
+    db.fail_job(job_id, None, "boom")  # must not raise
+
+    with db.connect() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        item = conn.execute(
+            "SELECT status, error FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+    assert job["status"] == "failed"
+    assert job["error"] == "boom"
+    assert item["status"] == "todo"
+    assert item["error"] is None
+
+
+def test_find_stale_running_jobs_only_returns_jobs_past_the_cutoff(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Stale", None)
+    with db.connect() as conn:
+        stale_id = _insert_job(conn, pid, db, status="running")
+        fresh_id = _insert_job(conn, pid, db, status="running")
+        conn.execute(
+            "UPDATE jobs SET heartbeat_at = '2024-01-01T00:00:00+00:00' WHERE id = ?",
+            (stale_id,),
+        )
+        conn.execute(
+            "UPDATE jobs SET heartbeat_at = '2024-12-31T23:59:59+00:00' WHERE id = ?",
+            (fresh_id,),
+        )
+
+    rows = db.find_stale_running_jobs("2024-06-15T00:00:00+00:00")
+
+    assert [row["id"] for row in rows] == [stale_id]
+
+
+def test_find_all_running_jobs_returns_every_running_job_regardless_of_heartbeat(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("All Running", None)
+    with db.connect() as conn:
+        a = _insert_job(conn, pid, db, status="running")
+        b = _insert_job(conn, pid, db, status="running")
+        conn.execute(
+            "UPDATE jobs SET heartbeat_at = '2024-01-01T00:00:00+00:00' WHERE id = ?",
+            (a,),
+        )
+        conn.execute(
+            "UPDATE jobs SET heartbeat_at = '2024-12-31T23:59:59+00:00' WHERE id = ?",
+            (b,),
+        )
+
+    rows = db.find_all_running_jobs()
+
+    assert {row["id"] for row in rows} == {a, b}
+
+
+def test_create_note_and_ingest_job_inserts_at_next_position(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Note Next Pos", None)
+    with db.connect() as conn:
+        existing = _insert_item(conn, pid, db, position=0)
+
+    item_id, job_id = db.create_note_and_ingest_job(pid, "hello world")
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert item_id != existing
+    assert item["project_id"] == pid
+    assert item["kind"] == "note"
+    assert item["status"] == "pending"
+    assert item["raw_text"] == "hello world"
+    assert item["position"] == 1
+    assert job["project_id"] == pid
+    assert job["item_id"] == item_id
+    assert job["kind"] == "ingest"
+    assert job["status"] == "queued"
+
+
+def test_create_note_and_ingest_job_position_zero_when_project_has_no_items(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Note Zero", None)
+
+    item_id, job_id = db.create_note_and_ingest_job(pid, "first")
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT position FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+    assert item["position"] == 0
+
+
+def test_list_active_jobs_only_returns_queued_and_running_for_the_given_project(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid_a, _ = db.create_project("Active A", None)
+    pid_b, _ = db.create_project("Active B", None)
+    with db.connect() as conn:
+        queued_a = _insert_job(
+            conn, pid_a, db, status="queued", created_at="2024-01-01T00:00:00+00:00"
+        )
+        running_a = _insert_job(
+            conn, pid_a, db, status="running", created_at="2024-01-02T00:00:00+00:00"
+        )
+        _insert_job(
+            conn, pid_a, db, status="done", created_at="2024-01-03T00:00:00+00:00"
+        )
+        _insert_job(
+            conn, pid_a, db, status="failed", created_at="2024-01-04T00:00:00+00:00"
+        )
+        _insert_job(
+            conn, pid_b, db, status="queued", created_at="2024-01-05T00:00:00+00:00"
+        )
+
+    rows = db.list_active_jobs(pid_a)
+
+    assert [row["id"] for row in rows] == [queued_a, running_a]
+    for row in rows:
+        assert row["status"] in ("queued", "running")
+
+
+def test_items_rev_stable_when_unchanged_and_changes_on_item_insert_or_update(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Rev", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+
+    rev1 = db.items_rev(pid)
+    rev2 = db.items_rev(pid)
+    assert rev1 == rev2
+
+    with db.connect() as conn:
+        _insert_item(conn, pid, db, position=1)
+
+    rev3 = db.items_rev(pid)
+    assert rev3 != rev1
+
+    db.update_item(item_id, title="new title")
+
+    rev4 = db.items_rev(pid)
+    assert rev4 != rev3
+
+
+def test_latest_synthesis_version_zero_when_none_then_reflects_max(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Ver", None)
+    assert db.latest_synthesis_version(pid) == 0
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "created_at) VALUES (?, 3, 'd', '[]', ?)",
+            (pid, db._now()),
+        )
+        conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "created_at) VALUES (?, 5, 'd', '[]', ?)",
+            (pid, db._now()),
+        )
+    assert db.latest_synthesis_version(pid) == 5
+
+
+def test_live_jobs_by_item_maps_item_to_its_live_job_and_excludes_jobs_with_null_item_id(
+    app_env,
+):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Live Map", None)
+    with db.connect() as conn:
+        item_a = _insert_item(conn, pid, db, position=0)
+        item_b = _insert_item(conn, pid, db, position=1)
+        running_a = _insert_job(
+            conn, pid, db, kind="ingest", status="running", item_id=item_a
+        )
+        _insert_job(conn, pid, db, kind="ingest", status="done", item_id=item_b)
+        _insert_job(conn, pid, db, kind="resynthesize", status="running")
+
+    mapping = db.live_jobs_by_item(pid)
+
+    assert set(mapping.keys()) == {item_a}
+    assert mapping[item_a]["id"] == running_a
+    assert mapping[item_a]["status"] == "running"

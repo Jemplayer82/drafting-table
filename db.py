@@ -418,3 +418,230 @@ def supersede_decision(
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+
+# ---------------------------------------------------------------------------
+# Job pipeline SQL layer
+# ---------------------------------------------------------------------------
+
+def claim_next_job(worker_id: str) -> sqlite3.Row | None:
+    """Atomically claims the oldest queued job. SQLite serializes writers, so at most
+    one caller's UPDATE can satisfy the outer AND status='queued' guard; losers get
+    zero RETURNING rows and fetchone() returns None."""
+    now = _now()
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE jobs SET status='running', worker_id=?, started_at=?, heartbeat_at=?
+            WHERE id = (
+                SELECT id FROM jobs WHERE status='queued' ORDER BY created_at, id LIMIT 1
+            )
+              AND status='queued'
+            RETURNING *
+            """,
+            (worker_id, now, now),
+        )
+        row = cur.fetchone()
+        assert row is None or cur.rowcount == 1
+        return row
+
+
+def set_job_phase(job_id: int, phase: str) -> None:
+    """Records a job phase transition; a phase transition also counts as a heartbeat."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET phase=?, heartbeat_at=? WHERE id=?",
+            (phase, _now(), job_id),
+        )
+
+
+def complete_ingest_job(job_id: int, item_id: int, title: str) -> None:
+    """Marks an ingest item as ready with its extracted title and the ingest job as done.
+    Both updates share one timestamp and run in one transaction."""
+    now = _now()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE items SET status='ready', title=?, updated_at=? WHERE id=?",
+                (title, now, item_id),
+            )
+            conn.execute(
+                "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=? WHERE id=?",
+                (now, now, job_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def complete_job(job_id: int) -> None:
+    """Marks a job as done without touching items or syntheses (used by resynthesize)."""
+    with connect() as conn:
+        now = _now()
+        conn.execute(
+            "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=? WHERE id=?",
+            (now, now, job_id),
+        )
+
+
+def chain_resynthesize_job(project_id: int) -> None:
+    """Debounced insert of a queued 'resynthesize' job. If a queued or running
+    resynthesize job already exists for the project, this is a no-op."""
+    now = _now()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (project_id, kind, status, created_at)
+            SELECT ?, 'resynthesize', 'queued', ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM jobs
+                WHERE project_id = ? AND kind = 'resynthesize'
+                  AND status IN ('queued', 'running')
+            )
+            """,
+            (project_id, now, project_id),
+        )
+
+
+def fail_job(job_id: int, item_id: int | None, error: str) -> None:
+    """Marks a job as failed with the given error message. If item_id is provided,
+    the matching item is also marked failed. Resynthesize jobs pass item_id=None."""
+    now = _now()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=?",
+                (error, now, job_id),
+            )
+            if item_id is not None:
+                conn.execute(
+                    "UPDATE items SET status='failed', error=?, updated_at=? WHERE id=?",
+                    (error, now, item_id),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def find_stale_running_jobs(cutoff: str) -> list[sqlite3.Row]:
+    """Returns running jobs whose heartbeat is older than the given ISO cutoff."""
+    with connect() as conn:
+        return conn.execute(
+            """
+            SELECT id, item_id, project_id, kind
+            FROM jobs
+            WHERE status='running' AND heartbeat_at < ?
+            ORDER BY id
+            """,
+            (cutoff,),
+        ).fetchall()
+
+
+def find_all_running_jobs() -> list[sqlite3.Row]:
+    """Returns every currently running job, regardless of heartbeat age."""
+    with connect() as conn:
+        return conn.execute(
+            """
+            SELECT id, item_id, project_id, kind
+            FROM jobs
+            WHERE status='running'
+            ORDER BY id
+            """
+        ).fetchall()
+
+
+def get_item(item_id: int) -> sqlite3.Row | None:
+    """Returns the full items row for item_id, or None if it doesn't exist."""
+    with connect() as conn:
+        return conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+
+
+def create_note_and_ingest_job(project_id: int, raw_text: str) -> tuple[int, int]:
+    """Creates a new 'note' item in pending status and a queued 'ingest' job for it,
+    all in one transaction. The item is appended at the next position in the project.
+    Returns (item_id, job_id)."""
+    now = _now()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            pos_row = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos "
+                "FROM items WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            position = pos_row["next_pos"]
+            cur = conn.execute(
+                "INSERT INTO items "
+                "(project_id, kind, status, raw_text, position, created_at, updated_at) "
+                "VALUES (?, 'note', 'pending', ?, ?, ?, ?)",
+                (project_id, raw_text, position, now, now),
+            )
+            item_id = cur.lastrowid
+            cur = conn.execute(
+                "INSERT INTO jobs "
+                "(project_id, item_id, kind, status, created_at) "
+                "VALUES (?, ?, 'ingest', 'queued', ?)",
+                (project_id, item_id, now),
+            )
+            job_id = cur.lastrowid
+            conn.execute("COMMIT")
+            return item_id, job_id
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def list_active_jobs(project_id: int) -> list[sqlite3.Row]:
+    """Returns queued or running jobs for a project, oldest first."""
+    with connect() as conn:
+        return conn.execute(
+            """
+            SELECT id, kind, status, phase
+            FROM jobs
+            WHERE project_id=? AND status IN ('queued', 'running')
+            ORDER BY created_at
+            """,
+            (project_id,),
+        ).fetchall()
+
+
+def items_rev(project_id: int) -> str:
+    """Returns a composite revision token for a project's item set. The same DB state
+    always yields the same token, and any add/remove/update of an item changes it."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c, MAX(updated_at) AS m "
+            "FROM items WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+    return f"{row['c']}:{row['m'] or ''}"
+
+
+def latest_synthesis_version(project_id: int) -> int:
+    """Returns the highest synthesis version for a project, or 0 if none exist."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(version) AS v FROM syntheses WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+    return row["v"] or 0
+
+
+def live_jobs_by_item(project_id: int) -> dict[int, sqlite3.Row]:
+    """Maps each project item that has a queued/running job to its live job row.
+    Jobs with item_id=NULL (e.g. resynthesize jobs) are excluded."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, item_id, status, phase
+            FROM jobs
+            WHERE project_id=? AND item_id IS NOT NULL
+              AND status IN ('queued', 'running')
+            """,
+            (project_id,),
+        ).fetchall()
+    return {row["item_id"]: row for row in rows}
