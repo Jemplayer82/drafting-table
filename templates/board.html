@@ -19,15 +19,15 @@
         <span class="dt-board--new__plus">+</span>
         <span>new project</span>
       </button>
-      <form method="post" action="/projects" id="new-project-form" class="dt-board--new__form d-none">
+      <form method="post" action="/projects" id="new-project-form" class="dt-board--new__form {{ '' if error else 'd-none' }}">
         <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
         <div class="fc-field">
           <label class="fc-field__label" for="new-project-name">Name</label>
-          <input class="fc-input" type="text" id="new-project-name" name="name" maxlength="200" required>
+          <input class="fc-input" type="text" id="new-project-name" name="name" maxlength="200" required value="{{ request.form.get('name', '') }}">
         </div>
         <div class="fc-field">
           <label class="fc-field__label" for="new-project-note">Note (optional)</label>
-          <textarea class="fc-input" id="new-project-note" name="note" rows="2"></textarea>
+          <textarea class="fc-input" id="new-project-note" name="note" rows="2">{{ request.form.get('note', '') }}</textarea>
         </div>
         <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm w-100">Create</button>
       </form>
