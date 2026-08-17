@@ -9,6 +9,10 @@
     <span class="dt-rule__meta">{{ items|length }} ITEM{{ 'S' if items|length != 1 else '' }}</span>
   </div>
 
+  {% if item_error %}
+  <div class="dt-alert dt-alert--danger">! {{ item_error }}</div>
+  {% endif %}
+
   <div class="dt-project-layout">
     <div class="dt-project-rail">
       <div class="fc-panel">
@@ -49,7 +53,7 @@
 
     <div class="dt-items">
       {% for item in items %}
-      <div class="dt-item">
+      <div class="dt-item" id="item-{{ item.id }}">
         {% if item.thumb_media_id %}
         <div class="dt-item__media">
           <img src="/media/{{ item.thumb_media_id }}" alt="{{ item.alt_text or '' }}" loading="lazy">

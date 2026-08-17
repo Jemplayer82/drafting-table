@@ -203,15 +203,25 @@ def media(mid):  # noqa: ANN001, ANN201
     return resp
 
 
-@app.route("/p/<slug>")
-def project_detail(slug):  # noqa: ANN001, ANN201
+def _render_project(
+    slug: str,
+    *,
+    open_item_id: int | None = None,
+    item_error: str | None = None,
+    decision_error: str | None = None,
+) -> str | None:
+    """Shared by GET /p/<slug> and every mutating route's validation-failure path.
+    Returns None if slug doesn't resolve to a non-archived project (caller 404s).
+    open_item_id/item_error/decision_error are consumed by project.html markup added
+    in later steps -- this step only threads them through render_template so those
+    steps never need to touch this function's signature again."""
     with db.connect() as conn:
         proj = conn.execute(
             "SELECT id, name, slug, note FROM projects WHERE slug = ? AND archived_at IS NULL",
             (slug,),
         ).fetchone()
         if proj is None:
-            return "", 404
+            return None
         items = conn.execute(
             "SELECT id, kind, status, source_url, title, tag, note_md, alt_text, "
             "thumb_media_id, thumb_w, thumb_h, position FROM items "
@@ -271,7 +281,16 @@ def project_detail(slug):  # noqa: ANN001, ANN201
         "project.html", project=proj, items=view_items, synthesis=synthesis,
         direction_lines=direction_lines, questions=questions,
         decisions=decisions_view, nonce=g.csp_nonce,
+        open_item_id=open_item_id, item_error=item_error, decision_error=decision_error,
     )
+
+
+@app.route("/p/<slug>")
+def project_detail(slug):  # noqa: ANN001, ANN201
+    html = _render_project(slug)
+    if html is None:
+        return "", 404
+    return html
 
 
 if __name__ == "__main__":
