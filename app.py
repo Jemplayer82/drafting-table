@@ -252,7 +252,7 @@ def project_detail(slug):  # noqa: ANN001, ANN201
 
     direction_lines = []
     if synthesis:
-        for line in synthesis["direction_md"].split("\n"):
+        for line in (synthesis["direction_md"] or "").split("\n"):
             stripped = line.strip()
             if stripped:
                 direction_lines.append(stripped[2:] if stripped.startswith("- ") else stripped)
@@ -267,8 +267,9 @@ def project_detail(slug):  # noqa: ANN001, ANN201
         decisions_view.append({"label": label, "body_md": row["body_md"]})
 
     return render_template(
-        "project.html", project=proj, items=view_items, direction_lines=direction_lines,
-        questions=questions, decisions=decisions_view, nonce=g.csp_nonce,
+        "project.html", project=proj, items=view_items, synthesis=synthesis,
+        direction_lines=direction_lines, questions=questions,
+        decisions=decisions_view, nonce=g.csp_nonce,
     )
 
 

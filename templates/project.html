@@ -13,8 +13,12 @@
     <div class="dt-project-rail">
       <div class="fc-panel">
         <span class="fc-panel__title">ideas &amp; direction</span>
-        {% if direction_lines %}
-          {% for line in direction_lines %}<p class="dt-bullet">{{ line }}</p>{% endfor %}
+        {% if synthesis %}
+          {% if direction_lines %}
+            {% for line in direction_lines %}<p class="dt-bullet">{{ line }}</p>{% endfor %}
+          {% else %}
+            <p class="dt-empty">no direction bullets yet.</p>
+          {% endif %}
         {% else %}
           <p class="dt-empty">no synthesis yet.</p>
         {% endif %}
