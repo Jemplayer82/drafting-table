@@ -97,6 +97,26 @@ def _insert_job(
     return cur.lastrowid
 
 
+def _run_ingest_and_get_item(
+    conn,
+    project_id,
+    *,
+    raw_text=None,
+    source_url=None,
+    worker_id="worker-x",
+):
+    item_id = _insert_item(
+        conn,
+        project_id=project_id,
+        raw_text=raw_text,
+        source_url=source_url,
+    )
+    _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+    job = db.claim_next_job(worker_id)
+    worker.run_ingest_job(job, sleep=_noop_sleep)
+    return db.get_item(item_id)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_db(app_env):
     importlib.reload(db)
@@ -385,3 +405,65 @@ def test_resynthesize_not_chained_when_ingest_job_is_reaper_failed_instead_of_co
             (project_id,),
         ).fetchone()
         assert count["c"] == 0
+
+
+def test_run_ingest_job_derives_untitled_when_text_and_url_are_empty():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("empty", "")
+        item = _run_ingest_and_get_item(
+            conn, project_id, raw_text=None, source_url=None
+        )
+        assert item["status"] == "ready"
+        assert "placeholder" not in item["title"].lower()
+        assert item["title"] == "Untitled note"
+
+
+def test_run_ingest_job_derives_untitled_for_whitespace_text_even_with_source_url():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("whitespace", "")
+        item = _run_ingest_and_get_item(
+            conn,
+            project_id,
+            raw_text="   \t\n",
+            source_url="http://example.com/note",
+        )
+        assert item["status"] == "ready"
+        assert item["title"] == "Untitled note"
+
+
+def test_run_ingest_job_derives_title_from_first_line_of_multiline_raw_text():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("multiline", "")
+        item = _run_ingest_and_get_item(
+            conn,
+            project_id,
+            raw_text="first line of the note\nsecond line\nthird line",
+        )
+        assert item["status"] == "ready"
+        assert item["title"] == "first line of the note"
+
+
+def test_run_ingest_job_uses_first_non_blank_line_when_leading_line_is_whitespace():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("blankfirst", "")
+        item = _run_ingest_and_get_item(
+            conn,
+            project_id,
+            raw_text="   \nreal content on a later line",
+        )
+        assert item["status"] == "ready"
+        assert item["title"] == "real content on a later line"
+
+
+def test_run_ingest_job_truncates_long_first_line_to_eighty_chars_plus_ellipsis():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("truncate", "")
+        long_first = "a" * 100
+        item = _run_ingest_and_get_item(
+            conn,
+            project_id,
+            raw_text=long_first + "\nsecond line",
+        )
+        assert item["status"] == "ready"
+        assert item["title"] == "a" * 80 + "..."
+        assert len(item["title"]) == 83
