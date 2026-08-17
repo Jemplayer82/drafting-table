@@ -236,12 +236,15 @@ def create_project(name: str, note: str | None) -> tuple[int, str]:
 
 
 def move_item(item_id: int, direction: str) -> bool:
-    """Swaps this item's position with its immediate neighbor's (next-lower position
-    for 'up', next-higher for 'down') within the same project, tie-broken by id to
-    match project_detail()'s own 'ORDER BY position, id' rendering order. Runs in one
-    transaction. Returns True if a swap happened, False if item_id doesn't exist or
-    has no neighbor in that direction (already first/last). Raises ValueError if
-    direction isn't 'up'/'down'."""
+    """Moves this item one step in its project's render order ('up' means toward
+    the front, 'down' toward the end), matching project_detail()'s own
+    'ORDER BY position, id' order. When the item and its neighbor have distinct
+    positions, their position values are swapped. When they are tied on position,
+    the full project's items are renumbered to sequential distinct positions so
+    the two rows actually exchange order. Runs in one transaction. Returns True
+    if a move happened, False if item_id doesn't exist or has no neighbor in that
+    direction (already first/last). Raises ValueError if direction isn't
+    'up'/'down'."""
     if direction not in ("up", "down"):
         raise ValueError("direction must be 'up' or 'down'")
     with connect() as conn:
@@ -271,14 +274,35 @@ def move_item(item_id: int, direction: str) -> bool:
                 conn.execute("ROLLBACK")
                 return False
             now = _now()
-            conn.execute(
-                "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
-                (neighbor["position"], now, item_id),
-            )
-            conn.execute(
-                "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
-                (row["position"], now, neighbor["id"]),
-            )
+            if neighbor["position"] != row["position"]:
+                conn.execute(
+                    "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
+                    (neighbor["position"], now, item_id),
+                )
+                conn.execute(
+                    "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
+                    (row["position"], now, neighbor["id"]),
+                )
+            else:
+                # Tie: a plain position swap would be a no-op. Renumber the
+                # whole project in render order, swapping the moving item with
+                # its immediate neighbor in that order, so their relative order
+                # really flips.
+                ids = [
+                    r["id"]
+                    for r in conn.execute(
+                        "SELECT id FROM items WHERE project_id = ? ORDER BY position, id",
+                        (row["project_id"],),
+                    )
+                ]
+                idx = ids.index(item_id)
+                swap_idx = idx - 1 if direction == "up" else idx + 1
+                ids[idx], ids[swap_idx] = ids[swap_idx], ids[idx]
+                for pos, id_ in enumerate(ids):
+                    conn.execute(
+                        "UPDATE items SET position = ?, updated_at = ? WHERE id = ?",
+                        (pos, now, id_),
+                    )
             conn.execute("COMMIT")
             return True
         except Exception:
