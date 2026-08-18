@@ -30,6 +30,7 @@ REAP_INTERVAL_SECONDS = 60
 HEARTBEAT_STALE_SECONDS = 600  # 10 minutes
 PHASE_SLEEP_SECONDS = 0.75
 MAX_PAGE_TEXT_CHARS = 8000
+MAX_PAGE_TITLE_CHARS = 300
 ABANDONED_ERROR = "abandoned -- no heartbeat, worker likely crashed"
 
 
@@ -46,7 +47,8 @@ def _load_secret_from_file_or_env(var: str) -> None:
 def _parse_page(html_body: bytes) -> tuple[str | None, str | None, str]:
     """Parses html_body ONCE and returns (title, image_url, body_text).
 
-    title is the first <title> tag's stripped text, or None if missing/empty.
+    title is the first <title> tag's stripped text, capped at
+    MAX_PAGE_TITLE_CHARS, or None if missing/empty.
     image_url is the 'content' of <meta property="og:image">, falling back to
     <meta name="twitter:image">, or None if neither is present/non-empty.
     image_url may be relative -- the caller resolves it against the page's final
@@ -58,7 +60,7 @@ def _parse_page(html_body: bytes) -> tuple[str | None, str | None, str]:
     """
     soup = BeautifulSoup(html_body, "html.parser")
     title_tag = soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else None
+    title = title_tag.get_text(strip=True)[:MAX_PAGE_TITLE_CHARS] if title_tag else None
     title = title or None
 
     image_url = None

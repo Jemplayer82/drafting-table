@@ -228,16 +228,19 @@ def run_claude(
         env = _build_subprocess_env()
         popen_kwargs = _platform_popen_kwargs()
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            **popen_kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                **popen_kwargs,
+            )
+        except OSError as exc:
+            raise AgentProcessError(_scrub_error_text(str(exc))) from exc
 
         stdout_chunks: list[str] = []
         stderr_chunks: deque[str] = deque(maxlen=200)
