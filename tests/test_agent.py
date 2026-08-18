@@ -776,6 +776,29 @@ def test_run_claude_vision_timeout_kills_whole_process_tree(
     assert not _pid_alive(dump["child_pid"])
 
 
+def test_run_claude_vision_timeout_captures_stdin_before_hang(
+    fake_claude, tmp_path
+) -> None:
+    fake_claude(hang=True)
+    with pytest.raises(agent.AgentTimeoutError):
+        agent.run_claude(
+            "sys",
+            "prompt",
+            SIMPLE_SCHEMA,
+            image={"media_type": "image/png", "data": "AAAA"},
+            timeout_s=2.0,
+        )
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    dump = json.loads(dump_path.read_text(encoding="utf-8"))
+    assert not _pid_alive(dump["pid"])
+    assert "child_pid" in dump
+    assert not _pid_alive(dump["child_pid"])
+    assert "stdin" in dump
+    assert isinstance(dump["stdin"], str)
+    assert len(dump["stdin"]) > 0
+
+
 def test_run_claude_vision_env_excludes_dangerous_vars(
     fake_claude, tmp_path, monkeypatch
 ) -> None:

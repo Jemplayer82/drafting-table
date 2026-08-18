@@ -37,7 +37,16 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
         def _write_dump(extra: dict | None = None) -> None:
-            state = {"argv": sys.argv, "env": dict(os.environ), "pid": os.getpid()}
+            if _DUMP_PATH.exists():
+                try:
+                    state = json.loads(_DUMP_PATH.read_text(encoding="utf-8"))
+                    if not isinstance(state, dict):
+                        state = {}
+                except Exception:
+                    state = {}
+            else:
+                state = {}
+            state.update({"argv": sys.argv, "env": dict(os.environ), "pid": os.getpid()})
             if extra:
                 state.update(extra)
             _DUMP_PATH.write_text(json.dumps(state), encoding="utf-8")
