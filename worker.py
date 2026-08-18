@@ -321,12 +321,15 @@ def run_resynthesize_job(job, *, sleep=time.sleep) -> None:
     sleep(PHASE_SLEEP_SECONDS)
 
     db.set_job_phase(job["id"], "persist")
+    trigger_item_id = job["trigger_item_id"]
+    if trigger_item_id is not None and db.get_item(trigger_item_id) is None:
+        trigger_item_id = None
     db.insert_synthesis(
         job["project_id"],
         result["direction_md"],
         json.dumps(result["open_questions"]),
         context["item_count"],
-        job["trigger_item_id"],
+        trigger_item_id,
         job["id"],
     )
     for proposal in result["proposed_decisions"]:
