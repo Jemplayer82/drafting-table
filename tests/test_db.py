@@ -1672,3 +1672,46 @@ def test_insert_synthesis_race_safety_under_concurrent_threads(app_env):
     assert len(rows) == 2
     assert set(versions) == {1, 2}
     assert directions == {"dir X", "dir Y"}
+
+
+def test_insert_synthesis_propagates_integrity_error_on_unique_violation(
+    app_env, monkeypatch
+):
+    import sqlite3
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Unique Violation", None)
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if "INSERT INTO syntheses" in sql:
+                raise sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: syntheses.project_id, syntheses.version"
+                )
+            return super().execute(sql, *args, **kwargs)
+
+    original_sqlite_connect = sqlite3.connect
+
+    def patched_sqlite_connect(*args, **kwargs):
+        kwargs["factory"] = FailingConnection
+        return original_sqlite_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", patched_sqlite_connect)
+
+    try:
+        db.insert_synthesis(pid, "dir", "[]", 1, None, 1)
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint failed" not in str(exc):
+            raise AssertionError(f"unexpected sqlite3.IntegrityError: {exc}")
+    else:
+        raise AssertionError(
+            "expected sqlite3.IntegrityError to propagate from insert_synthesis"
+        )
+
+    with db.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM syntheses WHERE project_id = ?", (pid,)
+        ).fetchone()["n"]
+    assert count == 0
