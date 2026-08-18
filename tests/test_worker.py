@@ -109,6 +109,28 @@ def _insert_job(
     return cur.lastrowid
 
 
+def _insert_ready_item(
+    conn,
+    *,
+    project_id,
+    title,
+    note_md,
+    updated_at=None,
+):
+    if updated_at is None:
+        updated_at = _now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO items (project_id, kind, status, title, note_md, position,
+                           created_at, updated_at)
+        VALUES (?, 'note', 'ready', ?, ?, 0, ?, ?)
+        """,
+        (project_id, title, note_md, _now_iso(), updated_at),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
 def _make_jpeg_bytes() -> bytes:
     img = Image.new("RGB", (300, 200), color=(120, 180, 220))
     buf = BytesIO()
@@ -507,6 +529,250 @@ def test_run_resynthesize_job_agent_failure_fails_job_generically_no_writes(
             (project_id,),
         ).fetchone()
         assert decision_count["c"] == 0
+
+
+def test_run_resynthesize_job_append_only_decisions_guarantee_end_to_end(fake_claude):
+    fake_claude(
+        structured_output={
+            "direction_md": "New direction.",
+            "open_questions": [],
+            "proposed_decisions": [
+                {"decision": "Use teal", "rationale": "converged"},
+                {"decision": "Drop the grid", "rationale": "converged"},
+            ],
+        }
+    )
+    with db.connect() as conn:
+        project_id, _ = db.create_project("append-only", "")
+        for title in ("Alpha", "Beta", "Gamma"):
+            _insert_ready_item(
+                conn, project_id=project_id, title=title, note_md=f"note {title}"
+            )
+        db.insert_decision(project_id, "First accepted", "because one")
+        db.insert_decision(project_id, "Second accepted", "because two")
+
+        pre_decisions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM decisions WHERE project_id = ? ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "done"
+
+        for pre in pre_decisions:
+            row = conn.execute(
+                "SELECT * FROM decisions WHERE id = ?", (pre["id"],)
+            ).fetchone()
+            assert dict(row) == pre
+
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM decisions WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()["c"]
+        assert count == 4
+
+        new_rows = conn.execute(
+            """
+            SELECT * FROM decisions
+            WHERE project_id = ? AND source = 'agent' AND status = 'proposed'
+            ORDER BY id
+            """,
+            (project_id,),
+        ).fetchall()
+        assert len(new_rows) == 2
+        assert sorted(r["body_md"] for r in new_rows) == ["Drop the grid", "Use teal"]
+        assert all(
+            r["source"] == "agent" and r["status"] == "proposed" for r in new_rows
+        )
+
+
+def test_run_resynthesize_job_increments_version_across_two_real_runs(fake_claude):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("versions", "")
+        for i in range(3):
+            _insert_ready_item(
+                conn, project_id=project_id, title=f"Item {i}", note_md="n"
+            )
+
+        _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        fake_claude(
+            structured_output={
+                "direction_md": "First direction.",
+                "open_questions": [],
+                "proposed_decisions": [],
+            }
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        assert db.latest_synthesis_version(project_id) == 1
+
+        db.chain_resynthesize_job(project_id)
+        fake_claude(
+            structured_output={
+                "direction_md": "Second direction.",
+                "open_questions": [],
+                "proposed_decisions": [],
+            }
+        )
+        job2 = db.claim_next_job("worker-y")
+        worker.run_resynthesize_job(job2, sleep=_noop_sleep)
+
+        assert db.latest_synthesis_version(project_id) == 2
+
+        rows = conn.execute(
+            """
+            SELECT version, direction_md
+            FROM syntheses WHERE project_id = ? ORDER BY version
+            """,
+            (project_id,),
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["version"] == 1
+        assert rows[0]["direction_md"] == "First direction."
+        assert rows[1]["version"] == 2
+        assert rows[1]["direction_md"] == "Second direction."
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_run_resynthesize_job_under_three_ready_items_never_invokes_fake_claude_binary(
+    count, fake_claude, tmp_path
+):
+    fake_claude(
+        structured_output={
+            "direction_md": "Should not run.",
+            "open_questions": [],
+            "proposed_decisions": [{"decision": "d", "rationale": "r"}],
+        }
+    )
+    with db.connect() as conn:
+        project_id, _ = db.create_project(f"under3-real-{count}", "")
+        for i in range(count):
+            _insert_ready_item(
+                conn, project_id=project_id, title=f"Ready {i}", note_md="n"
+            )
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "done"
+
+        synth_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM syntheses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()["c"]
+        assert synth_count == 0
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    assert not dump_path.exists()
+
+
+def test_run_resynthesize_job_failure_path_leaves_tables_untouched(fake_claude):
+    fake_claude(exit_code=1, stderr="boom " + "A" * 30)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("resynth-fail-real", "")
+        for i in range(3):
+            _insert_ready_item(
+                conn, project_id=project_id, title=f"Item {i}", note_md="n"
+            )
+        db.insert_decision(project_id, "Existing decision", "rationale")
+
+        pre_decisions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM decisions WHERE project_id = ? ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+        pre_synth_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM syntheses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()["c"]
+
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status, error FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "failed"
+        assert job_row["error"] == "resynthesis failed"
+        assert "boom" not in job_row["error"].lower()
+
+        synth_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM syntheses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()["c"]
+        assert synth_count == pre_synth_count == 0
+
+        post_decisions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM decisions WHERE project_id = ? ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+        assert post_decisions == pre_decisions
+
+
+def test_run_resynthesize_job_digest_caps_at_25_of_30_ready_items(fake_claude, tmp_path):
+    fake_claude(
+        structured_output={
+            "direction_md": "ok",
+            "open_questions": [],
+            "proposed_decisions": [],
+        }
+    )
+    with db.connect() as conn:
+        project_id, _ = db.create_project("cap-30", "")
+        base = datetime.datetime(2024, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+        for i in range(30):
+            _insert_ready_item(
+                conn,
+                project_id=project_id,
+                title=f"Item {i}",
+                note_md="n",
+                updated_at=(base + datetime.timedelta(seconds=i)).isoformat(),
+            )
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "done"
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    data = json.loads(dump_path.read_text(encoding="utf-8"))
+    prompt = data["argv"][-1]
+    for i in range(5):
+        # trailing "\n" disambiguates e.g. "Item 1" from "Item 15"/"Item 19"
+        assert f"Title: Item {i}\n" not in prompt
+    assert prompt.count("Title: Item ") == 25
 
 
 def test_run_ingest_job_url_kind_passes_trigger_item_id_when_chaining(

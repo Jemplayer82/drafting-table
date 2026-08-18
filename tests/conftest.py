@@ -81,8 +81,18 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     impl_path.write_text(impl_source, encoding="utf-8")
 
     if sys.platform == "win32":
-        launcher_path = tmp_path / "fake_claude.cmd"
-        launcher_body = f'@echo off\n"{sys.executable}" "{impl_path}" %*\n'
+        # A .cmd launcher can't be used here: cmd.exe's command-line reader is
+        # line-based and corrupts/truncates any argument containing an embedded
+        # newline even inside quotes (verified empirically) -- and the real
+        # multi-line prompts this driver sends (item digests, page text) would
+        # get silently truncated before the wrapped script ever saw them.
+        # PowerShell's argv handling doesn't have that limitation, so the fixture
+        # emulates the real CLI as a .ps1 script instead; agent.py's
+        # _command_for() knows to invoke a resolved .ps1 via `powershell -File`.
+        launcher_path = tmp_path / "fake_claude.ps1"
+        py_exe = sys.executable.replace("'", "''")
+        impl = str(impl_path).replace("'", "''")
+        launcher_body = f"& '{py_exe}' '{impl}' @args\n"
     else:
         launcher_path = tmp_path / "fake_claude"
         shebang = f"#!{sys.executable}"

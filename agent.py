@@ -188,6 +188,30 @@ def _validate_against_schema(value: object, schema: dict, path: str = "$") -> No
             raise AgentValidationError(f"{path}: string not in enum")
 
 
+def _command_for(resolved: str, args: list[str]) -> list[str]:
+    """Build the actual argv to Popen for `resolved` invoked with `args`.
+
+    Real `claude` on this infra is a native PE .exe (confirmed on this dev
+    machine), so this is normally a no-op: [resolved, *args]. The one
+    exception is a `.ps1` script (not something the real CLI ever is, but a
+    legitimate thing CLAUDE_BIN could point at -- e.g. this repo's own test
+    fixture emulates the CLI this way): `.ps1` files aren't directly
+    Popen-able on Windows the way `.cmd`/`.bat` are, so route them through
+    `powershell.exe -File`. This is NOT a workaround for `.cmd`/`.bat` --
+    those are deliberately unsupported here. cmd.exe re-parses its own
+    invocation command line and treats a literal embedded newline as a line
+    terminator even *inside* a quoted argument (verified empirically), so a
+    `.cmd`-wrapped CLAUDE_BIN would silently truncate any multi-line prompt
+    (which `analyze_item`/`resynthesize_project` both routinely send) before
+    the wrapped script ever saw it. PowerShell's own argv handling does not
+    have that limitation.
+    """
+    if resolved.lower().endswith(".ps1"):
+        powershell = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+        return [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved, *args]
+    return [resolved, *args]
+
+
 def run_claude(
     system: str,
     prompt: str,
@@ -197,7 +221,10 @@ def run_claude(
     timeout_s: float = 120.0,
 ) -> dict:
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
-    resolved = shutil.which(claude_bin)
+    # shutil.which() only matches an already-qualified path as-is when its
+    # extension is in PATHEXT (default doesn't include .ps1), so a full path
+    # to an existing file must be honored directly rather than re-searched.
+    resolved = claude_bin if os.path.isfile(claude_bin) else shutil.which(claude_bin)
     if resolved is None:
         raise AgentProcessError(
             f"claude CLI not found: {claude_bin!r} (check PATH or CLAUDE_BIN)"
@@ -208,8 +235,7 @@ def run_claude(
         # Headless claude walks up from cwd discovering .claude/settings.json and
         # CLAUDE.md; .claude/settings.json can define hooks. A dedicated fresh
         # empty temp dir has neither, closing that hole.
-        cmd = [
-            resolved,
+        cmd = _command_for(resolved, [
             "-p",
             "--strict-mcp-config",
             "--setting-sources",
@@ -228,7 +254,7 @@ def run_claude(
             json.dumps(schema),
             "--",
             prompt,
-        ]
+        ])
         # --strict-mcp-config is required together with --tools "".
         # --tools alone does not stop headless claude from loading user-scope
         # mcpServers and leaking docker containers. The -- must be second-to-last,
