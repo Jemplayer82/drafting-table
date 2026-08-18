@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -174,6 +175,7 @@ CANNED_ANALYZE_RESULT = {
     "tag": "tag",
     "note": "n",
     "swatches": [],
+    "alt_text": "",
     "confidence": "low",
 }
 
@@ -189,6 +191,118 @@ def test_analyze_item_happy_path_returns_run_claude_result_unchanged(
         title_hint=None, url=None, page_text=None, user_note="a note"
     )
     assert result == CANNED_ANALYZE_RESULT
+
+
+def test_analyze_item_text_only_uses_text_prompt_and_no_image_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        calls.append((system, kwargs))
+        return CANNED_ANALYZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.analyze_item(
+        title_hint="Hint",
+        url="http://example.com",
+        page_text="body",
+        user_note="note",
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == agent._ANALYZE_ITEM_SYSTEM_PROMPT_TEXT
+    assert "image" not in calls[0][1]
+
+
+def test_analyze_item_with_image_uses_vision_prompt_and_base64_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        calls.append((system, kwargs))
+        return CANNED_ANALYZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+
+    image_bytes = b"fake-image-bytes"
+    agent.analyze_item(
+        None,
+        None,
+        None,
+        None,
+        image_bytes=image_bytes,
+        image_media_type="image/jpeg",
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == agent._ANALYZE_ITEM_SYSTEM_PROMPT_VISION
+    assert calls[0][1]["image"] == {
+        "media_type": "image/jpeg",
+        "data": base64.b64encode(image_bytes).decode("ascii"),
+    }
+
+
+def test_analyze_item_image_only_uses_image_fallback_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_ANALYZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.analyze_item(
+        None,
+        None,
+        None,
+        None,
+        image_bytes=b"\x89PNG\r\n\x1a\n",
+        image_media_type="image/png",
+    )
+
+    assert (
+        "An image was provided for this item; no other text content was "
+        "submitted alongside it."
+    ) in prompts[0]
+    assert "No content was provided for this item." not in prompts[0]
+
+
+def test_analyze_item_schema_requires_alt_text_with_max_length_125() -> None:
+    assert "alt_text" in agent.ANALYZE_ITEM_SCHEMA["required"]
+    alt_text_schema = agent.ANALYZE_ITEM_SCHEMA["properties"]["alt_text"]
+    assert alt_text_schema["type"] == "string"
+    assert alt_text_schema["maxLength"] == 125
+
+
+def test_analyze_item_vision_happy_path_validates_populated_swatches_and_alt_text(
+    fake_claude,
+) -> None:
+    structured_output = {
+        "title": "Vision Title",
+        "tag": "vision",
+        "note": "A visible composition with two strong colors.",
+        "swatches": [
+            {"hex": "#ff0000", "label": "red"},
+            {"hex": "#0000ff", "label": "blue"},
+        ],
+        "alt_text": "A red and blue composition.",
+        "confidence": "high",
+    }
+    fake_claude(structured_output=structured_output, stream_json=True)
+
+    result = agent.analyze_item(
+        None,
+        None,
+        None,
+        None,
+        image_bytes=b"image",
+        image_media_type="image/png",
+    )
+
+    assert result == structured_output
 
 
 def test_analyze_item_fences_untrusted_content_with_fresh_unique_nonce_per_call(
