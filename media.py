@@ -77,6 +77,8 @@ def decode_and_validate(data: bytes) -> Image.Image:
 
     try:
         img = Image.open(BytesIO(data))
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise MediaValidationError("image exceeds the maximum allowed pixel dimensions") from exc
     except Exception as exc:
         raise MediaValidationError("could not read image data") from exc
 
