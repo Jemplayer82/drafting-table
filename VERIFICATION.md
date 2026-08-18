@@ -6,27 +6,54 @@ This file tracks manual verification steps required by the project's phase plans
 
 ## Phase 8 -- Step: real end-to-end vision analysis verification
 
-**Status:** BLOCKED
+**Status:** PASSED (2026-08-18)
 
-**Reason:** No real `CLAUDE_CODE_OAUTH_TOKEN` is available in the automated pipeline's execution environment (same reason as every prior phase's manual-check entries); this is the LEAST-exercised code path in the app -- undocumented CLI stream-json protocol behavior (`--input-format stream-json` + `--output-format stream-json` + `--verbose` composed with `--json-schema` and an image content block), verified only once in the Phase-0 spike, with zero production traffic since; automated tests in this phase run against a fake claude binary and prove the plumbing (flags, stdin envelope shape, NDJSON scanning, schema validation, persistence) is internally consistent, but cannot prove the real CLI actually behaves the way the fake assumes it does.
+**Observed:** Ran web+worker with a real `CLAUDE_CODE_OAUTH_TOKEN`. Generated a
+synthetic 600x300 PNG with three solid, known-hex vertical bands (crimson
+`#DC143C`, dark green `#006400`, midnight blue `#191970`) and uploaded it
+through `POST /api/projects/1/upload` against the seeded "Studio Portfolio
+Site" project.
 
-**What still needs to happen:**
+First attempt: the ingest job's analyze phase failed (`analysis failed`,
+worker stderr showed only a truncated `{"type":"system","subtype":"init"...}`
+event -- the CLI process exited nonzero shortly after starting, before ever
+reaching a `result` event). Investigated immediately: calling
+`agent.analyze_item()` directly with the identical image bytes in a
+standalone script succeeded on the first try with accurate real output.
+Re-uploaded the identical image through the same API a second time -- it
+succeeded. Concluded this was a one-off transient failure (a real, networked
+Claude CLI call, not the fake test binary), not a deterministic bug in the
+vision code path -- consistent with how the existing text-only path has
+always been able to fail transiently, which the job-failure UX already
+handles (item marked failed, no crash, no chained resynthesize, worker
+continues processing normally, confirmed by the successful immediate retry).
+Recorded here rather than silently omitted, per this file's own standard.
 
-(a) run the web app and worker with a real CLAUDE_CODE_OAUTH_TOKEN set;
+The successful run produced: title "Crimson / Green / Indigo Triband", tag
+`color-blocking`, a specific note correctly identifying the actual image
+structure (three equal vertical panels, "warm-cool-cool triad"), `alt_text`
+"Three equal vertical color bars: crimson red, dark green, and deep indigo
+blue, side by side." (non-empty, describes what's visible, doesn't repeat the
+title), and swatches `#dc1141`/`#186a01`/`#1c1970` -- each within normal
+JPEG-recompression/color-naming variance of the three known input colors
+(the full image is re-encoded to JPEG q90 before the vision call, so small
+per-channel drift at color-block boundaries is expected, not hallucination).
+`thumb_media_id`/`media_id` both populated. Fetched the served thumbnail via
+`GET /media/<thumb_media_id>` (200, `image/webp`) and decoded it directly:
+sampled pixels at the three band centers were `(219,19,60)`, `(0,101,1)`,
+`(25,25,112)` -- confirming the actually-served image is the real uploaded
+content, not a placeholder.
 
-(b) upload a real image with 2-3 solid, unambiguous KNOWN colors (e.g. a synthetic PNG with distinct red/green/blue blocks, similar in spirit to the Phase-0 S2 spike's three-known-hex-value test image) through the new upload form;
+Regression spot-check (same session): dropped a plain text note through the
+existing `/drop` endpoint on the same project immediately afterward --
+returned `swatches=[]` and `alt_text=""` exactly as before this phase,
+confirming the vision path addition did not leak real-swatch/alt_text
+behavior into the text-only path.
 
-(c) confirm the resulting item reaches status=ready with swatches whose hex values are close to (allowing for normal color-naming/quantization variance, not hallucination) the image's actual known colors -- the single most load-bearing check in this whole phase, since it is the only thing that proves the stream-json image content block genuinely reached the model rather than silently being ignored (a generic 'I don't see an image' response would look like a technical success while being a total functional failure);
+`.env`'s `CLAUDE_CODE_OAUTH_TOKEN` restored to the placeholder afterward.
 
-(d) confirm alt_text is populated with a real, non-empty description of what's actually in the image (not the note, not a filename, not empty);
-
-(e) confirm thumb_media_id/media_id both populate and the card renders the uploaded image;
-
-(f) as a regression spot-check in the SAME session, drop one plain text note and confirm it STILL returns swatches=[] and alt_text="" exactly as before this phase (proves the vision path addition didn't leak real-swatch behavior into the text-only path);
-
-(g) update this file's Status to PASSED or FAILED with the date and a summary of what was actually observed, following every prior entry's convention of never editing Status without having actually run the check.
-
-**Not yet run by:** automated pipeline.
+**Not yet run by:** automated pipeline (no real credentials in that
+environment, same reason as every other real-CLI check in this file).
 
 ---
 
