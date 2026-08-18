@@ -103,17 +103,58 @@ def decode_and_validate(data: bytes) -> Image.Image:
     return img
 
 
+def _has_transparency(img: Image.Image) -> bool:
+    """Return True if the image carries transparency information."""
+    return img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+
+
+def _prepare_for_target(img: Image.Image, supports_alpha: bool) -> Image.Image:
+    """Return the image converted/flattened appropriately for the target format.
+
+    For alpha-capable targets (WebP), RGBA/LA/P-with-transparency images are
+    kept as RGBA so transparency survives.
+
+    For alpha-incapable targets (JPEG), transparent images are composited
+    onto a solid white background before conversion to RGB, so transparent
+    pixels become white instead of the arbitrary color stored under the
+    alpha channel.
+
+    Images without transparency are converted to plain RGB as before.
+    """
+    has_alpha = _has_transparency(img)
+
+    if supports_alpha:
+        if has_alpha:
+            return img.convert("RGBA")
+        return img.convert("RGB") if img.mode != "RGB" else img
+
+    # Target format cannot store alpha: flatten onto white first.
+    if has_alpha:
+        img = img.convert("RGBA")
+        white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(white_bg, img)
+
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
+
+
 def _write_media_file(
     img: Image.Image, pillow_format: str, mime: str, ext: str, **save_kwargs: object
 ) -> str:
     """Save a Pillow image to disk and record it in the media table.
 
-    Converts to RGB if necessary. Only the current frame is saved unless
+    The image is converted to the correct mode for the target format:
+    transparent sources going to an alpha-capable format keep their alpha
+    channel; transparent sources going to an alpha-incapable format are
+    composited onto white. Only the current frame is saved unless
     save_all=True is passed. The file id is generated with
     secrets.token_hex(16); the relative path is never derived from user input.
     """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+    supports_alpha = pillow_format == "WEBP"
+    img = _prepare_for_target(img, supports_alpha)
 
     media_id = secrets.token_hex(16)
     rel_path = f"{media_id[:2]}/{media_id}.{ext}"
@@ -134,9 +175,8 @@ def store_full_image(img: Image.Image) -> str:
 
     Returns the new media_id.
     """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
     full = img.copy()
+    full = _prepare_for_target(full, supports_alpha=False)
     full.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
     return _write_media_file(full, "JPEG", "image/jpeg", "jpg", quality=90)
 
@@ -146,9 +186,8 @@ def store_thumbnail(img: Image.Image) -> tuple[str, int, int]:
 
     Returns (thumb_media_id, width, height).
     """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
     thumb = img.copy()
+    thumb = _prepare_for_target(thumb, supports_alpha=True)
     thumb.thumbnail((640, 640), Image.Resampling.LANCZOS)
     media_id = _write_media_file(thumb, "WEBP", "image/webp", "webp", quality=82)
     return media_id, thumb.width, thumb.height
