@@ -382,7 +382,7 @@ def test_resynthesize_project_passes_180s_timeout_and_the_resynthesize_schema(
     assert schema is agent.RESYNTHESIZE_SCHEMA
 
 
-def test_resynthesize_project_fences_item_content_but_not_trusted_context(
+def test_resynthesize_project_fences_item_content_and_previous_synthesis_and_decisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompts: list[str] = []
@@ -417,31 +417,39 @@ def test_resynthesize_project_fences_item_content_but_not_trusted_context(
     agent.resynthesize_project(context)
     prompt = prompts[0]
 
-    match = re.search(
-        r"<<UNTRUSTED-([0-9a-f]{16})>>(.*?)<<END-UNTRUSTED-\1>>",
-        prompt,
-        re.DOTALL,
-    )
-    assert match
-    fenced = match.group(2)
+    fenced_spans = [
+        (m.start(), m.end())
+        for m in re.finditer(
+            r"<<UNTRUSTED-([0-9a-f]{16})>>(.*?)<<END-UNTRUSTED-\1>>",
+            prompt,
+            re.DOTALL,
+        )
+    ]
+    assert len(fenced_spans) >= 1
 
-    assert "ADVERSARIAL-TITLE-MARKER" in fenced
-    assert "ADVERSARIAL-TAG-MARKER" in fenced
-    assert "ADVERSARIAL-NOTE-MARKER" in fenced
-    assert "ADVERSARIAL-URL-MARKER" in fenced
+    def _inside_any_fenced_span(text: str) -> bool:
+        pos = prompt.index(text)
+        return any(start <= pos < end for start, end in fenced_spans)
+
+    item_markers = (
+        "ADVERSARIAL-TITLE-MARKER",
+        "ADVERSARIAL-TAG-MARKER",
+        "ADVERSARIAL-NOTE-MARKER",
+        "ADVERSARIAL-URL-MARKER",
+    )
+    for marker in item_markers:
+        assert _inside_any_fenced_span(marker)
 
     assert "TRUSTED-DECISION-MARKER" in prompt
     assert "TRUSTED-PREVDIR-MARKER" in prompt
     assert "TRUSTED-PREVQ-MARKER" in prompt
 
-    trusted_markers = (
+    for marker in (
         "TRUSTED-DECISION-MARKER",
         "TRUSTED-PREVDIR-MARKER",
         "TRUSTED-PREVQ-MARKER",
-    )
-    for marker in trusted_markers:
-        pos = prompt.index(marker)
-        assert pos < match.start() or pos > match.end()
+    ):
+        assert _inside_any_fenced_span(marker)
 
 
 def test_resynthesize_project_handles_missing_previous_synthesis_without_crashing(
