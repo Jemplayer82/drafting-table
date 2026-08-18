@@ -32,6 +32,9 @@ RICH_SCHEMA = {
 }
 
 
+_STRUCTURED_OUTPUT_DEFAULT = object()
+
+
 @pytest.fixture
 def fake_claude(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     impl_path = tmp_path / "fake_claude_impl.py"
@@ -111,16 +114,23 @@ def fake_claude(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     def configure(
         *,
         structured_output: dict | None = None,
+        is_error: bool = False,
+        result: str | None = None,
+        structured_output_field: object = _STRUCTURED_OUTPUT_DEFAULT,
         exit_code: int = 0,
         stderr: str = "",
         hang: bool = False,
     ) -> None:
+        if structured_output_field is _STRUCTURED_OUTPUT_DEFAULT:
+            structured_output_field = structured_output
+        if result is None:
+            result = json.dumps(structured_output) if structured_output is not None else ""
         envelope = {
             "type": "result",
             "subtype": "success",
-            "is_error": False,
-            "structured_output": structured_output,
-            "result": json.dumps(structured_output) if structured_output is not None else "",
+            "is_error": is_error,
+            "structured_output": structured_output_field,
+            "result": result,
         }
         recipe = {
             "envelope": envelope,
@@ -256,6 +266,21 @@ def test_run_claude_argv_places_double_dash_immediately_before_prompt(
     argv = json.loads(dump_path.read_text(encoding="utf-8"))["argv"]
     assert argv[-2] == "--"
     assert argv[-1] == distinctive
+
+
+def test_run_claude_is_error_true_raises_agent_process_error(fake_claude) -> None:
+    fake_claude(is_error=True, result="claude CLI reported an error")
+    with pytest.raises(agent.AgentProcessError):
+        agent.run_claude("sys", "prompt", SIMPLE_SCHEMA)
+
+
+def test_run_claude_falls_back_to_result_json_when_structured_output_is_missing(
+    fake_claude,
+) -> None:
+    payload = {"status": "ready"}
+    fake_claude(structured_output_field=None, result=json.dumps(payload))
+    result = agent.run_claude("sys", "prompt", SIMPLE_SCHEMA)
+    assert result == payload
 
 
 CANNED_ANALYZE_RESULT = {
