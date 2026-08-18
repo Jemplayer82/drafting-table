@@ -572,6 +572,10 @@ def resynthesize_project(context: dict) -> dict:
             prev_questions = json.loads(prev.get("questions_json") or "[]")
         except (json.JSONDecodeError, TypeError):
             prev_questions = []
+        if not isinstance(prev_questions, list) or not all(
+            isinstance(q, dict) for q in prev_questions
+        ):
+            prev_questions = []
         if prev_questions:
             prev_questions_text = "\n".join(
                 f"- {q.get('question', '')}" for q in prev_questions
