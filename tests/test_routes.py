@@ -243,3 +243,19 @@ def test_project_page_example_project_renders_decisions(logged_in_client):
     assert len(item_blocks) == 2
     assert b'dt-item__media' not in resp.data
     assert b'/media/' not in resp.data
+
+
+def test_project_page_shows_synthesis_version_in_both_panel_titles(logged_in_client):
+    resp = logged_in_client.get("/p/jemplayer82-web-design-ideas")
+    assert resp.status_code == 200
+    assert b'ideas &amp; direction &middot; v1' in resp.data
+    assert b'open questions &middot; v1' in resp.data
+
+
+def test_project_page_omits_version_suffix_when_no_synthesis_exists(logged_in_client):
+    import db
+
+    _, slug = db.create_project('Empty Project', None)
+    resp = logged_in_client.get(f"/p/{slug}")
+    assert resp.status_code == 200
+    assert b'&middot; v' not in resp.data

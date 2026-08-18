@@ -16,7 +16,7 @@
   <div class="dt-project-layout">
     <div class="dt-project-rail">
       <div class="fc-panel">
-        <span class="fc-panel__title">ideas &amp; direction</span>
+        <span class="fc-panel__title">ideas &amp; direction{% if synthesis %} &middot; v{{ synthesis.version }}{% endif %}</span>
         {% if synthesis %}
           {% if direction_lines %}
             {% for line in direction_lines %}<p class="dt-bullet">{{ line }}</p>{% endfor %}
@@ -60,7 +60,7 @@
         </form>
       </div>
       <div class="fc-panel">
-        <span class="fc-panel__title">open questions</span>
+        <span class="fc-panel__title">open questions{% if synthesis %} &middot; v{{ synthesis.version }}{% endif %}</span>
         {% if questions %}
         <ul class="dt-questions">
           {% for q in questions %}<li>{{ q.question }}</li>{% endfor %}

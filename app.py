@@ -361,7 +361,7 @@ def _render_project(
                     item_ids,
                 ).fetchall()
             synthesis = conn.execute(
-                "SELECT direction_md, questions_json FROM syntheses "
+                "SELECT version, direction_md, questions_json FROM syntheses "
                 "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
                 (proj["id"],),
             ).fetchone()
