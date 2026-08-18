@@ -164,6 +164,8 @@ def _validate_against_schema(value: object, schema: dict, path: str = "$") -> No
         if "maxItems" in schema and len(value) > schema["maxItems"]:
             raise AgentValidationError(f"{path}: array exceeds maxItems")
         items = schema.get("items")
+        if items is None and value:
+            raise AgentValidationError(f"{path}: missing array items schema")
         for idx, item in enumerate(value):
             _validate_against_schema(item, items, f"{path}[{idx}]")
     elif stype == "string":
