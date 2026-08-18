@@ -296,13 +296,16 @@ def _fresh_db(app_env):
 
 @pytest.fixture(autouse=True)
 def _mock_analyze_item(monkeypatch, _fresh_db):
-    def _fake(*, title_hint=None, url=None, page_text=None, user_note=None):
+    def _fake(
+        *, title_hint=None, url=None, page_text=None, user_note=None, image_bytes=None, image_media_type=None
+    ):
         return {
             "title": title_hint or "Mock Title",
             "tag": "mock-tag",
             "note": "Mock analysis note.",
             "swatches": [],
             "confidence": "medium",
+            "alt_text": "",
         }
 
     monkeypatch.setattr(agent, "analyze_item", _fake)
@@ -353,6 +356,7 @@ def test_run_ingest_job_note_kind_uses_analyze_item_result(monkeypatch):
             "note": "AI note prose.",
             "swatches": [{"hex": "#112233", "label": "navy"}],
             "confidence": "high",
+            "alt_text": "AI-generated note alt text.",
         }
 
     monkeypatch.setattr(agent, "analyze_item", fake)
@@ -367,6 +371,7 @@ def test_run_ingest_job_note_kind_uses_analyze_item_result(monkeypatch):
         item = db.get_item(item_id)
         assert item["status"] == "ready"
         assert item["title"] == "AI Title"
+        assert item["alt_text"] == "AI-generated note alt text."
         assert item["tag"] == "ai-tag"
         assert item["note_md"] == "AI note prose."
         rows = conn.execute(
@@ -1439,6 +1444,7 @@ def test_run_ingest_job_url_kind_uses_analyze_item_result_for_title_tag_note_swa
             "note": "URL AI note.",
             "swatches": [{"hex": "#AABBCC", "label": "grey"}],
             "confidence": "medium",
+            "alt_text": "URL AI alt text.",
         }
 
     monkeypatch.setattr(agent, "analyze_item", fake)
@@ -1461,6 +1467,7 @@ def test_run_ingest_job_url_kind_uses_analyze_item_result_for_title_tag_note_swa
         item = db.get_item(item_id)
         assert item["status"] == "ready"
         assert item["title"] == "URL AI Title"
+        assert item["alt_text"] == "URL AI alt text."
         assert item["tag"] == "url-tag"
         assert item["note_md"] == "URL AI note."
         rows = conn.execute(

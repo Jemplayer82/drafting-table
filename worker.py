@@ -180,6 +180,7 @@ def _run_url_ingest(job, item, *, sleep) -> None:
         job["item_id"],
         analysis["title"],
         tag=analysis["tag"],
+        alt_text=analysis.get("alt_text"),
         note_md=analysis["note"],
         **media_fields,
     )
@@ -236,6 +237,7 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
         job["item_id"],
         analysis["title"],
         tag=analysis["tag"],
+        alt_text=analysis.get("alt_text"),
         note_md=analysis["note"],
     )
     db.replace_swatches(job["item_id"], swatches)
