@@ -87,9 +87,16 @@ def decode_and_validate(data: bytes) -> Image.Image:
         raise MediaValidationError("image exceeds the maximum allowed pixel dimensions")
 
     try:
-        img.load()
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", Image.DecompressionBombWarning)
+            img.load()
+        for warning in caught:
+            if issubclass(warning.category, Image.DecompressionBombWarning):
+                raise MediaValidationError("image exceeds the maximum allowed pixel dimensions")
+    except Image.DecompressionBombError as exc:
         raise MediaValidationError("image exceeds the maximum allowed pixel dimensions") from exc
+    except MediaValidationError:
+        raise
     except Exception as exc:
         raise MediaValidationError("could not decode image data") from exc
 

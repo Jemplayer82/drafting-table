@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 from io import BytesIO
 
 import pytest
@@ -96,6 +97,36 @@ def test_decode_and_validate_rejects_oversized_pixel_dimensions(app_env):
     small_buf = BytesIO()
     small.save(small_buf, format="PNG")
     assert media.decode_and_validate(small_buf.getvalue()) is not None
+
+
+def test_decode_and_validate_rejects_decompression_bomb_warning_at_load(app_env, monkeypatch):
+    """DecompressionBombWarning at img.load() time is caught locally.
+
+    Pillow warns (rather than erroring) when the decoded pixel count lands
+    between 1x and 2x MAX_IMAGE_PIXELS. The global warnings filter can be
+    reset or overridden by tooling, so decode_and_validate() must detect this
+    via its own local warnings context.
+    """
+    _init_db()
+
+    class FakeImage:
+        size = (100, 100)
+        mode = "RGB"
+
+        def load(self):
+            warnings.warn("decompression bomb", Image.DecompressionBombWarning)
+            return self
+
+    def fake_open(*args, **kwargs):
+        return FakeImage()
+
+    monkeypatch.setattr(media.Image, "open", fake_open)
+
+    # Simulate the module-level filter having been reset/overridden.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        with pytest.raises(media.MediaValidationError, match="maximum allowed pixel dimensions"):
+            media.decode_and_validate(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
 
 
 def test_decode_and_validate_animated_gif_stores_only_frame_0(app_env):
