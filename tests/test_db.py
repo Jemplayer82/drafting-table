@@ -1174,15 +1174,16 @@ def test_latest_synthesis_version_zero_when_none_then_reflects_max(app_env):
     pid, _ = db.create_project("Synth Ver", None)
     assert db.latest_synthesis_version(pid) == 0
     with db.connect() as conn:
+        now = db._now()
         conn.execute(
             "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
             "created_at) VALUES (?, 3, 'd', '[]', ?)",
-            (pid, db._now()),
+            (pid, now),
         )
         conn.execute(
             "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
             "created_at) VALUES (?, 5, 'd', '[]', ?)",
-            (pid, db._now()),
+            (pid, now),
         )
     assert db.latest_synthesis_version(pid) == 5
 
@@ -1351,6 +1352,39 @@ def test_get_resynthesis_context_accepted_decisions_only_live(app_env):
     assert len(ctx["accepted_decisions"]) == 1
     assert ctx["accepted_decisions"][0]["body_md"] == "Live decision"
     assert ctx["accepted_decisions"][0]["rationale_md"] == "rationale live"
+
+
+def test_get_resynthesis_context_accepted_decisions_ordered_by_created_at(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Decisions Order", None)
+
+    with db.connect() as conn:
+        # Decision A is inserted first (lower id / insertion order) but has the
+        # LATER created_at timestamp.
+        conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "created_at) VALUES (?, ?, ?, 'user', 'accepted', ?)",
+            (pid, "A later body", "A rationale", "2024-01-02T00:00:00+00:00"),
+        )
+        # Decision B is inserted second (higher id / insertion order) but has the
+        # EARLIER created_at timestamp.
+        conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "created_at) VALUES (?, ?, ?, 'user', 'accepted', ?)",
+            (pid, "B earlier body", "B rationale", "2024-01-01T00:00:00+00:00"),
+        )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    # Only ORDER BY created_at ASC returns B before A; no ORDER BY, id order,
+    # or ORDER BY created_at DESC would all return A before B.
+    assert ctx["accepted_decisions"] == [
+        {"body_md": "B earlier body", "rationale_md": "B rationale"},
+        {"body_md": "A later body", "rationale_md": "A rationale"},
+    ]
 
 
 def test_get_resynthesis_context_previous_synthesis_reflects_highest_version(app_env):
