@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import pytest
 from PIL import Image
 
+import agent
 import db
 import net_guard
 import worker
@@ -102,26 +103,6 @@ def _insert_job(
     )
     conn.commit()
     return cur.lastrowid
-
-
-def _run_ingest_and_get_item(
-    conn,
-    project_id,
-    *,
-    raw_text=None,
-    source_url=None,
-    worker_id="worker-x",
-):
-    item_id = _insert_item(
-        conn,
-        project_id=project_id,
-        raw_text=raw_text,
-        source_url=source_url,
-    )
-    _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
-    job = db.claim_next_job(worker_id)
-    worker.run_ingest_job(job, sleep=_noop_sleep)
-    return db.get_item(item_id)
 
 
 def _make_jpeg_bytes() -> bytes:
@@ -253,6 +234,20 @@ def _fresh_db(app_env):
     importlib.reload(worker)
 
 
+@pytest.fixture(autouse=True)
+def _mock_analyze_item(monkeypatch, _fresh_db):
+    def _fake(*, title_hint=None, url=None, page_text=None, user_note=None):
+        return {
+            "title": title_hint or "Mock Title",
+            "tag": "mock-tag",
+            "note": "Mock analysis note.",
+            "swatches": [],
+            "confidence": "medium",
+        }
+
+    monkeypatch.setattr(agent, "analyze_item", _fake)
+
+
 def test_claim_race_two_workers_only_one_wins():
     with db.connect() as conn:
         project_id, _ = db.create_project("race", "")
@@ -287,29 +282,40 @@ def test_run_ingest_job_advances_phases_in_order():
     assert phases == ["fetch", "analyze", "persist"]
 
 
-def test_run_ingest_job_marks_item_ready_with_real_derived_title():
+def test_run_ingest_job_note_kind_uses_analyze_item_result(monkeypatch):
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return {
+            "title": "AI Title",
+            "tag": "ai-tag",
+            "note": "AI note prose.",
+            "swatches": [{"hex": "#112233", "label": "navy"}],
+            "confidence": "high",
+        }
+
+    monkeypatch.setattr(agent, "analyze_item", fake)
     with db.connect() as conn:
-        project_id, _ = db.create_project("title", "")
+        project_id, _ = db.create_project("ai-title", "")
         raw = "a note about teal accents"
         item_id = _insert_item(conn, project_id=project_id, raw_text=raw)
-        job_id = _insert_job(
-            conn, kind="ingest", project_id=project_id, item_id=item_id
-        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
         job = db.claim_next_job("worker-x")
         worker.run_ingest_job(job, sleep=_noop_sleep)
 
         item = db.get_item(item_id)
         assert item["status"] == "ready"
-        assert item["title"]
-        assert "placeholder" not in item["title"].lower()
-        assert item["title"] == raw[:80] + ("..." if len(raw) > 80 else "")
-
-        job_row = conn.execute(
-            "SELECT status, finished_at FROM jobs WHERE id = ?",
-            (job_id,),
-        ).fetchone()
-        assert job_row["status"] == "done"
-        assert job_row["finished_at"] is not None
+        assert item["title"] == "AI Title"
+        assert item["tag"] == "ai-tag"
+        assert item["note_md"] == "AI note prose."
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ?", (item_id,)
+        ).fetchall()
+        assert [(r["hex"], r["label"]) for r in rows] == [("#112233", "navy")]
+        assert calls == [
+            {"title_hint": None, "url": None, "page_text": None, "user_note": raw}
+        ]
 
 
 def test_run_ingest_job_chains_exactly_one_resynthesize_job():
@@ -533,68 +539,6 @@ def test_resynthesize_not_chained_when_ingest_job_is_reaper_failed_instead_of_co
             (project_id,),
         ).fetchone()
         assert count["c"] == 0
-
-
-def test_run_ingest_job_derives_untitled_when_text_and_url_are_empty():
-    with db.connect() as conn:
-        project_id, _ = db.create_project("empty", "")
-        item = _run_ingest_and_get_item(
-            conn, project_id, raw_text=None, source_url=None
-        )
-        assert item["status"] == "ready"
-        assert "placeholder" not in item["title"].lower()
-        assert item["title"] == "Untitled note"
-
-
-def test_run_ingest_job_derives_untitled_for_whitespace_text_even_with_source_url():
-    with db.connect() as conn:
-        project_id, _ = db.create_project("whitespace", "")
-        item = _run_ingest_and_get_item(
-            conn,
-            project_id,
-            raw_text="   \t\n",
-            source_url="http://example.com/note",
-        )
-        assert item["status"] == "ready"
-        assert item["title"] == "Untitled note"
-
-
-def test_run_ingest_job_derives_title_from_first_line_of_multiline_raw_text():
-    with db.connect() as conn:
-        project_id, _ = db.create_project("multiline", "")
-        item = _run_ingest_and_get_item(
-            conn,
-            project_id,
-            raw_text="first line of the note\nsecond line\nthird line",
-        )
-        assert item["status"] == "ready"
-        assert item["title"] == "first line of the note"
-
-
-def test_run_ingest_job_uses_first_non_blank_line_when_leading_line_is_whitespace():
-    with db.connect() as conn:
-        project_id, _ = db.create_project("blankfirst", "")
-        item = _run_ingest_and_get_item(
-            conn,
-            project_id,
-            raw_text="   \nreal content on a later line",
-        )
-        assert item["status"] == "ready"
-        assert item["title"] == "real content on a later line"
-
-
-def test_run_ingest_job_truncates_long_first_line_to_eighty_chars_plus_ellipsis():
-    with db.connect() as conn:
-        project_id, _ = db.create_project("truncate", "")
-        long_first = "a" * 100
-        item = _run_ingest_and_get_item(
-            conn,
-            project_id,
-            raw_text=long_first + "\nsecond line",
-        )
-        assert item["status"] == "ready"
-        assert item["title"] == "a" * 80 + "..."
-        assert len(item["title"]) == 83
 
 
 def test_run_ingest_job_url_kind_extracts_title_and_thumbnail_from_og_image(
@@ -943,3 +887,190 @@ def test_run_ingest_job_fails_when_note_item_deleted_mid_flight():
             (project_id,),
         ).fetchone()
         assert chained["c"] == 0
+
+
+def test_run_ingest_job_url_kind_uses_analyze_item_result_for_title_tag_note_swatches(
+    local_http_server, guard_allow_loopback, monkeypatch
+):
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return {
+            "title": "URL AI Title",
+            "tag": "url-tag",
+            "note": "URL AI note.",
+            "swatches": [{"hex": "#AABBCC", "label": "grey"}],
+            "confidence": "medium",
+        }
+
+    monkeypatch.setattr(agent, "analyze_item", fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-ai", "")
+        base_url = local_http_server(_PageWithoutOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "URL AI Title"
+        assert item["tag"] == "url-tag"
+        assert item["note_md"] == "URL AI note."
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ?", (item_id,)
+        ).fetchall()
+        assert [(r["hex"], r["label"]) for r in rows] == [("#AABBCC", "grey")]
+
+        call = calls[0]
+        assert call["url"] == source_url
+        assert call["user_note"] is None
+        assert call["title_hint"] == "No Image Here"
+        assert isinstance(call["page_text"], str)
+        assert call["page_text"].strip()
+
+
+def test_run_ingest_job_note_kind_analyze_item_failure_fails_job_generically_no_chain(
+    monkeypatch,
+):
+    def _raise(**kw):
+        raise agent.AgentError(
+            "boom: internal detail sk-fake-token-1234567890"
+        )
+
+    monkeypatch.setattr(agent, "analyze_item", _raise)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("note-fail", "")
+        raw = "a note that will break"
+        item_id = _insert_item(conn, project_id=project_id, raw_text=raw)
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "analysis failed"
+        lowered = item["error"].lower()
+        for leaked in ("boom", "internal detail", "sk-fake-token"):
+            assert leaked not in lowered
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_url_kind_analyze_item_failure_fails_job_generically_no_chain(
+    local_http_server, guard_allow_loopback, monkeypatch
+):
+    def _raise(**kw):
+        raise agent.AgentError(
+            "boom: internal detail sk-fake-token-1234567890"
+        )
+
+    monkeypatch.setattr(agent, "analyze_item", _raise)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-fail", "")
+        base_url = local_http_server(_PageWithoutOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "analysis failed"
+        lowered = item["error"].lower()
+        for leaked in ("boom", "internal detail", "sk-fake-token"):
+            assert leaked not in lowered
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_note_kind_drops_invalid_swatch_hex_but_keeps_valid_ones(
+    monkeypatch,
+):
+    def fake(**kwargs):
+        return {
+            "title": "Swatch Title",
+            "tag": "swatch-tag",
+            "note": "note",
+            "swatches": [
+                {"hex": "#GGGGGG", "label": "bad"},
+                {"hex": "#ABCDEF", "label": "good"},
+            ],
+            "confidence": "low",
+        }
+
+    monkeypatch.setattr(agent, "analyze_item", fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("swatch-filter", "")
+        item_id = _insert_item(conn, project_id=project_id, raw_text="x")
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ? ORDER BY position",
+            (item_id,),
+        ).fetchall()
+        assert [(r["hex"], r["label"]) for r in rows] == [("#ABCDEF", "good")]
+
+
+def test_parse_page_extracts_body_text_stripped_of_script_and_style_content():
+    html = (
+        b"<html><head><title>T</title>"
+        b"<style>body{color:red}</style>"
+        b"<script>var x=1;</script></head>"
+        b"<body><p>Real visible text here</p></body></html>"
+    )
+    title, image_url, body_text = worker._parse_page(html)
+    assert title == "T"
+    assert "color:red" not in body_text
+    assert "var x=1" not in body_text
+    assert "Real" in body_text
+    assert "visible" in body_text
+
+
+def test_parse_page_caps_body_text_at_max_page_text_chars():
+    body = b"<html><body><p>" + (b"word " * 5000) + b"</p></body></html>"
+    title, image_url, body_text = worker._parse_page(body)
+    assert len(body_text) <= worker.MAX_PAGE_TEXT_CHARS
+
+
+def test_main_exits_nonzero_without_oauth_token(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN_FILE", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        worker.main()
+    assert exc_info.value.code != 0

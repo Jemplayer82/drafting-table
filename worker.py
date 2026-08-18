@@ -10,6 +10,8 @@ path.
 from __future__ import annotations
 
 import datetime
+import os
+import re
 import secrets
 import sys
 import time
@@ -19,6 +21,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from PIL import Image
 
+import agent
 import db
 import net_guard
 
@@ -26,26 +29,33 @@ POLL_INTERVAL_SECONDS = 1.0
 REAP_INTERVAL_SECONDS = 60
 HEARTBEAT_STALE_SECONDS = 600  # 10 minutes
 PHASE_SLEEP_SECONDS = 0.75
+MAX_PAGE_TEXT_CHARS = 8000
 ABANDONED_ERROR = "abandoned -- no heartbeat, worker likely crashed"
 
 
-def _stub_title(item) -> str:
-    """Derive a real title from an item's raw text or source URL."""
-    text = (item["raw_text"] or item["source_url"] or "").strip() if item else ""
-    if not text:
-        return "Untitled note"
-    first_line = text.splitlines()[0].strip()
-    if not first_line:
-        return "Untitled note"
-    return first_line[:80] + ("..." if len(first_line) > 80 else "")
+def _load_secret_from_file_or_env(var: str) -> None:
+    """Support `<VAR>_FILE=/path` pointing at a mounted secret file, mirroring
+    app.py's own helper of the same name (duplicated, not imported, to avoid
+    pulling in app.py's Flask-construction side effects in this separate
+    process). Falls back to `<VAR>` as-is for local dev."""
+    file_path = os.environ.get(f"{var}_FILE")
+    if file_path:
+        os.environ[var] = open(file_path, encoding="utf-8").read().strip()
 
 
-def _parse_page(html_body: bytes) -> tuple[str | None, str | None]:
-    """Parses html_body ONCE and returns (title, image_url). title is the first
-    <title> tag's stripped text, or None if missing/empty. image_url is the
-    'content' of <meta property="og:image">, falling back to
-    <meta name="twitter:image">, or None if neither is present/non-empty. image_url
-    may be relative -- the caller resolves it against the page's final url."""
+def _parse_page(html_body: bytes) -> tuple[str | None, str | None, str]:
+    """Parses html_body ONCE and returns (title, image_url, body_text).
+
+    title is the first <title> tag's stripped text, or None if missing/empty.
+    image_url is the 'content' of <meta property="og:image">, falling back to
+    <meta name="twitter:image">, or None if neither is present/non-empty.
+    image_url may be relative -- the caller resolves it against the page's final
+    url.
+
+    body_text is the page's visible text with <script>, <style>, and <noscript>
+    removed, collapsed to a single space-separated string, then capped at
+    MAX_PAGE_TEXT_CHARS to control AI cost and prompt-injection surface.
+    """
     soup = BeautifulSoup(html_body, "html.parser")
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else None
@@ -59,7 +69,11 @@ def _parse_page(html_body: bytes) -> tuple[str | None, str | None]:
         tw = soup.find("meta", attrs={"name": "twitter:image"})
         if tw and tw.get("content"):
             image_url = tw["content"].strip()
-    return title, (image_url or None)
+
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    body_text = soup.get_text(separator=" ", strip=True)[:MAX_PAGE_TEXT_CHARS]
+    return title, (image_url or None), body_text
 
 
 def _write_media_file(img, pillow_format: str, mime: str, ext: str, **save_kwargs) -> str:
@@ -141,6 +155,31 @@ def _try_fetch_thumbnail(html_body: bytes, base_url: str) -> dict:
     }
 
 
+_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")  # matches app.py's own _HEX_RE exactly
+
+
+def _run_analysis_or_fail(job, *, title_hint, url, page_text, user_note) -> dict | None:
+    """Calls agent.analyze_item with the given inputs.
+
+    On ANY agent.AgentError (timeout, nonzero exit, schema validation failure,
+    subprocess error), logs a short context line to stderr, fails the job via
+    db.fail_job with a SHORT GENERIC message -- never the raw (even if already
+    scrubbed) CLI-derived text -- and returns None. The caller MUST check for None
+    and return immediately, WITHOUT chaining a resynthesize job, matching this
+    file's existing failure-path convention for fetch failures.
+
+    On success returns the validated analysis dict unchanged.
+    """
+    try:
+        return agent.analyze_item(
+            title_hint=title_hint, url=url, page_text=page_text, user_note=user_note
+        )
+    except agent.AgentError as exc:
+        print(f"ingest job {job['id']} analysis failed: {exc}", file=sys.stderr)
+        db.fail_job(job["id"], job["item_id"], "analysis failed")
+        return None
+
+
 def _run_url_ingest(job, item, *, sleep) -> None:
     db.set_job_phase(job["id"], "fetch")
     try:
@@ -156,9 +195,17 @@ def _run_url_ingest(job, item, *, sleep) -> None:
         return
 
     db.set_job_phase(job["id"], "analyze")
-    title, _image_url = _parse_page(result.body)
-    title = title or _stub_title(item)
+    title_hint, _image_url, page_text = _parse_page(result.body)
     media_fields = _try_fetch_thumbnail(result.body, result.final_url)
+    analysis = _run_analysis_or_fail(
+        job,
+        title_hint=title_hint,
+        url=item["source_url"],
+        page_text=page_text,
+        user_note=None,
+    )
+    if analysis is None:
+        return
     sleep(PHASE_SLEEP_SECONDS)
 
     db.set_job_phase(job["id"], "persist")
@@ -171,15 +218,30 @@ def _run_url_ingest(job, item, *, sleep) -> None:
         )
         return
 
-    db.complete_ingest_job(job["id"], job["item_id"], title, **media_fields)
+    swatches = [sw for sw in analysis["swatches"] if _HEX_RE.fullmatch(sw["hex"])]
+    db.complete_ingest_job(
+        job["id"],
+        job["item_id"],
+        analysis["title"],
+        tag=analysis["tag"],
+        note_md=analysis["note"],
+        **media_fields,
+    )
+    db.replace_swatches(job["item_id"], swatches)
     db.chain_resynthesize_job(job["project_id"])
 
 
 def run_ingest_job(job, *, sleep=time.sleep) -> None:
-    """Ingest handler for an already-claimed job row/dict. 'note' items still run
-    the stub phase-sleep pipeline (Phase 6 will replace this with a real claude -p
-    call); 'url' items run the real fetch/analyze pipeline via net_guard +
-    BeautifulSoup + Pillow, with no AI involved yet."""
+    """Ingest handler for an already-claimed job row/dict.
+
+    Both 'note' and 'url' items run a real agent.analyze_item() call during the
+    'analyze' phase. If agent.analyze_item() raises any agent.AgentError, the job
+    is failed with the generic message 'analysis failed', no CLI-derived details
+    are surfaced, and no resynthesize job is chained.
+
+    'url' items additionally fetch the page via net_guard, extract visible body
+    text and an optional og:image thumbnail, and pass those into the analysis.
+    """
     item = db.get_item(job["item_id"])
     if item is None:
         db.fail_job(
@@ -193,8 +255,17 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
 
     for phase in ("fetch", "analyze", "persist"):
         db.set_job_phase(job["id"], phase)
+        if phase == "analyze":
+            analysis = _run_analysis_or_fail(
+                job,
+                title_hint=None,
+                url=None,
+                page_text=None,
+                user_note=item["raw_text"],
+            )
+            if analysis is None:
+                return
         sleep(PHASE_SLEEP_SECONDS)
-    title = _stub_title(item)
 
     item = db.get_item(job["item_id"])
     if item is None:
@@ -203,7 +274,15 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
         )
         return
 
-    db.complete_ingest_job(job["id"], job["item_id"], title)
+    swatches = [sw for sw in analysis["swatches"] if _HEX_RE.fullmatch(sw["hex"])]
+    db.complete_ingest_job(
+        job["id"],
+        job["item_id"],
+        analysis["title"],
+        tag=analysis["tag"],
+        note_md=analysis["note"],
+    )
+    db.replace_swatches(job["item_id"], swatches)
     db.chain_resynthesize_job(job["project_id"])
 
 
@@ -259,6 +338,17 @@ def boot_reap() -> int:
 
 
 def main() -> None:
+    _load_secret_from_file_or_env("CLAUDE_CODE_OAUTH_TOKEN")
+    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        print(
+            "CLAUDE_CODE_OAUTH_TOKEN must be set (or CLAUDE_CODE_OAUTH_TOKEN_FILE pointing "
+            "at a mounted secret file) -- this worker refuses to start without it, since "
+            "every ingest job's analyze phase now runs a real claude -p call. Generate one "
+            "with:\n\n    claude setup-token\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     worker_id = secrets.token_hex(8)
     db.init_db()
     print(f"worker starting, worker_id={worker_id}", file=sys.stderr)
