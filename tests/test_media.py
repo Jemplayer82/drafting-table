@@ -75,6 +75,25 @@ def test_decode_and_validate_rejects_svg_with_explicit_message(app_env, monkeypa
         media.decode_and_validate(svg)
 
 
+def test_decode_and_validate_rejects_svg_with_no_xml_prolog(app_env, monkeypatch):
+    """_looks_like_svg checks "<?xml" in text OR "<svg" in text -- a bare
+    <svg> document with no XML prolog (the common hand-authored/inline shape,
+    and also what an SVG/raster polyglot would present) must still be
+    rejected by the "<svg" arm alone. Using a fixture that satisfies BOTH
+    conditions (like the sibling test above) can't tell an `or` from an `and`
+    here; this one can only pass if the `or` is real."""
+    _init_db()
+
+    def fake_open(*args, **kwargs):
+        raise AssertionError("Pillow Image.open should not be called for SVG")
+
+    monkeypatch.setattr(media.Image, "open", fake_open)
+
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    with pytest.raises(media.MediaValidationError, match="SVG"):
+        media.decode_and_validate(svg)
+
+
 def test_decode_and_validate_rejects_wrong_magic_bytes(app_env):
     _init_db()
     with pytest.raises(media.MediaValidationError) as exc_info:
@@ -114,7 +133,7 @@ def test_decode_and_validate_rejects_decompression_bomb_warning_at_load(app_env,
         mode = "RGB"
 
         def load(self):
-            warnings.warn("decompression bomb", Image.DecompressionBombWarning)
+            warnings.warn("decompression bomb", Image.DecompressionBombWarning, stacklevel=2)
             return self
 
     def fake_open(*args, **kwargs):

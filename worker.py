@@ -226,6 +226,16 @@ def _run_image_ingest(job, item, *, sleep) -> None:
         return
 
     db.set_job_phase(job["id"], "persist")
+    item = db.get_item(job["item_id"])
+    if item is None:
+        db.fail_job(
+            job["id"], job["item_id"], f"item {job['item_id']} was deleted before ingest completed"
+        )
+        return
+
+    # Checked above, before generating the thumbnail file/media row, not
+    # after: generating it first and only then discovering the item was
+    # deleted would leave that file/row orphaned, referenced by nothing.
     try:
         img = Image.open(BytesIO(image_bytes))
         img.load()
@@ -234,13 +244,6 @@ def _run_image_ingest(job, item, *, sleep) -> None:
     except Exception:
         thumb_fields = {}
     sleep(PHASE_SLEEP_SECONDS)
-
-    item = db.get_item(job["item_id"])
-    if item is None:
-        db.fail_job(
-            job["id"], job["item_id"], f"item {job['item_id']} was deleted before ingest completed"
-        )
-        return
 
     swatches = [sw for sw in analysis["swatches"] if _HEX_RE.fullmatch(sw["hex"])]
     db.complete_ingest_job(

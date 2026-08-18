@@ -695,6 +695,25 @@ def test_run_claude_vision_ndjson_ignores_non_result_filler_events(fake_claude) 
     assert result == {"status": "ready"}
 
 
+def test_run_claude_vision_ndjson_multiple_result_events_last_one_wins(fake_claude) -> None:
+    """The NDJSON scan keeps overwriting on every type=='result' line rather
+    than stopping at the first match, so if more than one such event ever
+    appears on stdout, the LAST one wins. A regression that stopped at the
+    first match instead would return the stale/decoy result below."""
+    fake_claude(
+        structured_output={"status": "ready"},
+        stream_json=True,
+        stream_events=[{"type": "result", "structured_output": {"status": "stale"}}],
+    )
+    result = agent.run_claude(
+        "sys",
+        "prompt",
+        SIMPLE_SCHEMA,
+        image={"media_type": "image/png", "data": "AAAA"},
+    )
+    assert result == {"status": "ready"}
+
+
 def test_run_claude_vision_ndjson_skips_unparseable_lines(fake_claude) -> None:
     fake_claude(
         structured_output={"status": "ready"},

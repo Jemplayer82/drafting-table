@@ -371,17 +371,32 @@ def run_claude(
         if in_thread is not None:
             in_thread.join(timeout=5.0)
 
-        for stream, active in (
-            (proc.stdout, True),
-            (proc.stderr, True),
-            (proc.stdin, use_image),
-        ):
-            if not active or stream is None:
-                continue
-            try:
-                stream.close()
-            except (BrokenPipeError, ValueError, OSError):
-                pass
+        # Closing runs on its own daemon thread with a timeout, not inline: if
+        # _reap_with_ladder's forceful kill fails to actually terminate the
+        # child (it deliberately tolerates that -- "best-effort past this
+        # point" above), in_thread's write() can still be blocked inside the
+        # OS write() syscall while holding the stream's internal buffer lock;
+        # close() needs that same lock to flush, so an inline close() here
+        # could block forever with nothing left upstream to time it out. Every
+        # other blocking call in this function is already timeout-bounded --
+        # this makes stream close consistent with that, never the one gap that
+        # can wedge the caller's job loop permanently on a truly stuck child.
+        def _close_streams() -> None:
+            for stream, active in (
+                (proc.stdout, True),
+                (proc.stderr, True),
+                (proc.stdin, use_image),
+            ):
+                if not active or stream is None:
+                    continue
+                try:
+                    stream.close()
+                except (BrokenPipeError, ValueError, OSError):
+                    pass
+
+        close_thread = threading.Thread(target=_close_streams, daemon=True)
+        close_thread.start()
+        close_thread.join(timeout=5.0)
 
         if timed_out:
             raise AgentTimeoutError(f"claude CLI exceeded {timeout_s:.0f}s timeout")

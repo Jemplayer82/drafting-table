@@ -1336,7 +1336,14 @@ def test_run_ingest_job_image_kind_happy_path(monkeypatch):
         full_path = db.MEDIA_DIR / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_bytes(_TEST_JPEG)
-        db.insert_media(media_id, rel_path, "image/jpeg", 300, 200, len(_TEST_JPEG))
+        # Deliberately NOT "image/jpeg" here: worker.py forwarding a hardcoded
+        # "image/jpeg" regardless of the stored row's real mime would slip
+        # past every other image-kind test in this file, since they all
+        # happen to use "image/jpeg" for both the stored value and the
+        # asserted value. Using a distinct mime (image/webp is one of the
+        # app's own supported upload formats) proves the real column value is
+        # what's actually threaded through to agent.analyze_item.
+        db.insert_media(media_id, rel_path, "image/webp", 300, 200, len(_TEST_JPEG))
 
         item_id = _insert_item(
             conn,
@@ -1369,7 +1376,7 @@ def test_run_ingest_job_image_kind_happy_path(monkeypatch):
                 "page_text": None,
                 "user_note": None,
                 "image_bytes": _TEST_JPEG,
-                "image_media_type": "image/jpeg",
+                "image_media_type": "image/webp",
             }
         ]
 

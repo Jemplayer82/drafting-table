@@ -8,6 +8,7 @@ explicitly rather than handed to Pillow.
 from __future__ import annotations
 
 import secrets
+import threading
 import warnings
 from io import BytesIO
 
@@ -17,6 +18,17 @@ import db
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
+
+# warnings.catch_warnings() mutates process-global state (warnings.filters,
+# warnings.showwarning) and is documented as not thread-safe. gunicorn runs
+# this app with --threads 4, so concurrent decode_and_validate() calls in the
+# same worker process can race inside the catch_warnings block below: one
+# thread's __exit__ can restore globals out from under another thread's still-
+# open capture, silently dropping a real DecompressionBombWarning. This lock
+# serializes just that narrow, warnings-state-touching window -- decode is
+# CPU-bound Pillow work already, not a high-frequency hot path, so serializing
+# it costs nothing that matters.
+_DECOMPRESSION_BOMB_LOCK = threading.Lock()
 
 
 class MediaValidationError(Exception):
@@ -87,7 +99,7 @@ def decode_and_validate(data: bytes) -> Image.Image:
         raise MediaValidationError("image exceeds the maximum allowed pixel dimensions")
 
     try:
-        with warnings.catch_warnings(record=True) as caught:
+        with _DECOMPRESSION_BOMB_LOCK, warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", Image.DecompressionBombWarning)
             img.load()
         for warning in caught:
