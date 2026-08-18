@@ -10,6 +10,7 @@ path.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import secrets
@@ -230,7 +231,7 @@ def _run_url_ingest(job, item, *, sleep) -> None:
         **media_fields,
     )
     db.replace_swatches(job["item_id"], swatches)
-    db.chain_resynthesize_job(job["project_id"])
+    db.chain_resynthesize_job(job["project_id"], trigger_item_id=job["item_id"])
 
 
 def run_ingest_job(job, *, sleep=time.sleep) -> None:
@@ -285,12 +286,55 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
         note_md=analysis["note"],
     )
     db.replace_swatches(job["item_id"], swatches)
-    db.chain_resynthesize_job(job["project_id"])
+    db.chain_resynthesize_job(job["project_id"], trigger_item_id=job["item_id"])
 
 
 def run_resynthesize_job(job, *, sleep=time.sleep) -> None:
-    """STUB resynthesize handler."""
+    """Real resynthesize handler: rewrites the project's Ideas & direction /
+    Open questions from scratch via agent.resynthesize_project, and proposes any
+    agent-suggested decisions via db.propose_decision (source='agent',
+    status='proposed' -- this NEVER touches any existing decisions row).
+
+    If the project currently has fewer than 3 status='ready' items, this is a
+    silent no-op success: the job is marked done without calling the agent or
+    writing any syntheses/decisions row (product rule: a synthesis built from
+    under 3 references is noise, and a resynthesize job arriving before the
+    project has enough material is not an error, just not-yet-applicable).
+
+    On any agent.AgentError (timeout, nonzero exit, schema validation failure),
+    the job is failed via db.fail_job(job['id'], None, 'resynthesis failed') --
+    item_id is None because resynthesize jobs have no associated item -- and no
+    syntheses/decisions rows are written.
+    """
+    context = db.get_resynthesis_context(job["project_id"])
+    if context["item_count"] < 3:
+        db.complete_job(job["id"])
+        return
+
+    db.set_job_phase(job["id"], "synthesize")
+    try:
+        result = agent.resynthesize_project(context)
+    except agent.AgentError as exc:
+        print(f"resynthesize job {job['id']} failed: {exc}", file=sys.stderr)
+        db.fail_job(job["id"], None, "resynthesis failed")
+        return
     sleep(PHASE_SLEEP_SECONDS)
+
+    db.set_job_phase(job["id"], "persist")
+    db.insert_synthesis(
+        job["project_id"],
+        result["direction_md"],
+        json.dumps(result["open_questions"]),
+        context["item_count"],
+        job["trigger_item_id"],
+        job["id"],
+    )
+    for proposal in result["proposed_decisions"]:
+        db.propose_decision(
+            job["project_id"], proposal["decision"], proposal["rationale"], job["id"]
+        )
+    sleep(PHASE_SLEEP_SECONDS)
+
     db.complete_job(job["id"])
 
 

@@ -10,6 +10,7 @@ import datetime
 import http.server
 import importlib
 import ipaddress
+import json
 import os
 import socket as socket_module
 from io import BytesIO
@@ -76,6 +77,7 @@ def _insert_job(
     kind,
     project_id,
     item_id,
+    trigger_item_id=None,
     status="queued",
     phase=None,
     heartbeat_at=None,
@@ -86,15 +88,16 @@ def _insert_job(
         created_at = _now_iso()
     cur = conn.execute(
         """
-        INSERT INTO jobs (kind, status, project_id, item_id, phase,
+        INSERT INTO jobs (kind, status, project_id, item_id, trigger_item_id, phase,
                           heartbeat_at, created_at, finished_at, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             kind,
             status,
             project_id,
             item_id,
+            trigger_item_id,
             phase,
             heartbeat_at,
             created_at,
@@ -362,6 +365,203 @@ def test_run_resynthesize_job_marks_done_and_never_touches_syntheses():
             (project_id,),
         ).fetchone()
         assert synth_count["c"] == 0
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_run_resynthesize_job_under_3_ready_items_never_calls_agent(
+    count, monkeypatch
+):
+    def _fake(_context):
+        raise AssertionError("agent.resynthesize_project should not be called")
+
+    monkeypatch.setattr(agent, "resynthesize_project", _fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("under3", "")
+        for i in range(count):
+            _insert_item(
+                conn, project_id=project_id, raw_text=f"note {i}", status="ready"
+            )
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "done"
+
+        synth_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM syntheses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        assert synth_count["c"] == 0
+
+
+def test_run_resynthesize_job_happy_path_writes_synthesis_and_proposed_decisions(
+    monkeypatch,
+):
+    def _fake(context):
+        assert context["item_count"] == 3
+        return {
+            "direction_md": "new direction",
+            "open_questions": [{"question": "q1", "why": "w1"}],
+            "proposed_decisions": [
+                {"decision": "d1", "rationale": "r1"},
+                {"decision": "d2", "rationale": "r2"},
+            ],
+        }
+
+    monkeypatch.setattr(agent, "resynthesize_project", _fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("happy", "")
+        item_ids = [
+            _insert_item(
+                conn, project_id=project_id, raw_text=f"note {i}", status="ready"
+            )
+            for i in range(3)
+        ]
+        job_id = _insert_job(
+            conn,
+            kind="resynthesize",
+            project_id=project_id,
+            item_id=None,
+            trigger_item_id=item_ids[0],
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        synth = conn.execute(
+            """
+            SELECT version, direction_md, questions_json, item_count,
+                   trigger_item_id, job_id
+            FROM syntheses WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert synth is not None
+        assert synth["version"] == 1
+        assert synth["direction_md"] == "new direction"
+        assert json.loads(synth["questions_json"]) == [
+            {"question": "q1", "why": "w1"}
+        ]
+        assert synth["item_count"] == 3
+        assert synth["trigger_item_id"] == item_ids[0]
+        assert synth["job_id"] == job_id
+
+        decisions = conn.execute(
+            """
+            SELECT body_md, rationale_md, source, status
+            FROM decisions WHERE project_id = ? ORDER BY id
+            """,
+            (project_id,),
+        ).fetchall()
+        assert [
+            (d["body_md"], d["rationale_md"], d["source"], d["status"])
+            for d in decisions
+        ] == [
+            ("d1", "r1", "agent", "proposed"),
+            ("d2", "r2", "agent", "proposed"),
+        ]
+
+        job_row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "done"
+
+
+def test_run_resynthesize_job_agent_failure_fails_job_generically_no_writes(
+    monkeypatch,
+):
+    def _fake(_context):
+        raise agent.AgentTimeoutError("claude CLI exceeded 180s timeout")
+
+    monkeypatch.setattr(agent, "resynthesize_project", _fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("agent-fail", "")
+        for i in range(3):
+            _insert_item(
+                conn, project_id=project_id, raw_text=f"note {i}", status="ready"
+            )
+        job_id = _insert_job(
+            conn, kind="resynthesize", project_id=project_id, item_id=None
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_resynthesize_job(job, sleep=_noop_sleep)
+
+        job_row = conn.execute(
+            "SELECT status, error FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        assert job_row["status"] == "failed"
+        assert job_row["error"] == "resynthesis failed"
+
+        synth_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM syntheses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        assert synth_count["c"] == 0
+
+        decision_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM decisions WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        assert decision_count["c"] == 0
+
+
+def test_run_ingest_job_url_kind_passes_trigger_item_id_when_chaining(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("chain-trigger-url", "")
+        base_url = local_http_server(_PageWithoutOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        url_item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=url_item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        resynth = conn.execute(
+            """
+            SELECT trigger_item_id, item_id
+            FROM jobs WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert resynth is not None
+        assert resynth["trigger_item_id"] == url_item_id
+        assert resynth["item_id"] is None
+
+
+def test_run_ingest_job_note_kind_passes_trigger_item_id_when_chaining():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("chain-trigger-note", "")
+        note_item_id = _insert_item(
+            conn, project_id=project_id, raw_text="a note"
+        )
+        _insert_job(
+            conn, kind="ingest", project_id=project_id, item_id=note_item_id
+        )
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        resynth = conn.execute(
+            """
+            SELECT trigger_item_id, item_id
+            FROM jobs WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert resynth is not None
+        assert resynth["trigger_item_id"] == note_item_id
+        assert resynth["item_id"] is None
 
 
 def test_periodic_reap_fails_stale_running_job_and_its_item():
