@@ -151,6 +151,13 @@ def _make_large_jpeg_bytes() -> bytes:
 _TEST_LARGE_JPEG = _make_large_jpeg_bytes()
 
 
+def _make_huge_png_bytes() -> bytes:
+    img = Image.new("RGB", (7001, 5716), color=(80, 160, 240))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class _PageWithOgImageHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/page":
@@ -237,6 +244,33 @@ class _PageWithMalformedOgImageHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html")
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _PageWithHugeOgImageHandler(http.server.BaseHTTPRequestHandler):
+    _image_bytes = None
+
+    def do_GET(self):
+        if self.path == "/page":
+            body = (
+                b"<html><head><title>Huge Image Page</title>"
+                b'<meta property="og:image" content="/img.png"></head>'
+                b"<body></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/img.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write(self._image_bytes)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, *a):
         pass
@@ -1188,6 +1222,42 @@ def test_run_ingest_job_url_kind_malformed_og_image_url_still_succeeds_without_t
         item = db.get_item(item_id)
         assert item["status"] == "ready"
         assert item["title"] == "Malformed Image Page"
+        assert item["media_id"] is None
+        assert item["thumb_media_id"] is None
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_url_kind_huge_og_image_declared_pixels_skips_thumbnail_without_failing(
+    local_http_server, guard_allow_loopback
+):
+    with db.connect() as conn:
+        project_id, _ = db.create_project("url-huge-og", "")
+        _PageWithHugeOgImageHandler._image_bytes = _make_huge_png_bytes()
+        base_url = local_http_server(_PageWithHugeOgImageHandler)
+        guard_allow_loopback(urlsplit(base_url).port)
+        source_url = base_url + "/page"
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="url",
+            source_url=source_url,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Huge Image Page"
         assert item["media_id"] is None
         assert item["thumb_media_id"] is None
 

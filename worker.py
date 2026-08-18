@@ -16,14 +16,13 @@ import re
 import secrets
 import sys
 import time
-from io import BytesIO
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from PIL import Image
 
 import agent
 import db
+import media
 import net_guard
 
 POLL_INTERVAL_SECONDS = 1.0
@@ -79,45 +78,6 @@ def _parse_page(html_body: bytes) -> tuple[str | None, str | None, str]:
     return title, (image_url or None), body_text
 
 
-def _write_media_file(img, pillow_format: str, mime: str, ext: str, **save_kwargs) -> str:
-    """Writes img to disk under db.MEDIA_DIR with a fresh secrets.token_hex(16) id
-    and records it via db.insert_media. Mirrors seed.py's own id/path/resize/
-    quality convention (read seed.py first for the exact numbers already
-    established in Phase 2) for consistency, without importing seed's private
-    helper directly -- this call site has no already-open transaction connection to
-    reuse the way seed.py's does, so it goes through db.insert_media's own
-    single-statement write instead. Returns the new media_id."""
-    media_id = secrets.token_hex(16)
-    buf = BytesIO()
-    img.save(buf, format=pillow_format, **save_kwargs)
-    data = buf.getvalue()
-    rel_path = f"{media_id[:2]}/{media_id}.{ext}"
-    abs_path = db.MEDIA_DIR / rel_path
-    abs_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_path.write_bytes(data)
-    db.insert_media(media_id, rel_path, mime, img.width, img.height, len(data))
-    return media_id
-
-
-def _store_thumbnail_pair(img) -> tuple[str, str, int, int]:
-    """Same resize/format/quality convention as seed.py's existing image storage:
-    full image capped at 1600px long edge as JPEG q90, thumbnail capped at 640px
-    long edge as WebP q82 (verify these exact numbers against seed.py and adjust
-    here to match if seed.py's Phase 2 convention differs). Returns (media_id,
-    thumb_media_id, thumb_width, thumb_height)."""
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    full_img = img.copy()
-    full_img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-    media_id = _write_media_file(full_img, "JPEG", "image/jpeg", "jpg", quality=90)
-
-    thumb_img = img.copy()
-    thumb_img.thumbnail((640, 640), Image.Resampling.LANCZOS)
-    thumb_id = _write_media_file(thumb_img, "WEBP", "image/webp", "webp", quality=82)
-
-    return media_id, thumb_id, thumb_img.width, thumb_img.height
-
-
 def _try_fetch_thumbnail(html_body: bytes, base_url: str) -> dict:
     """Best-effort: looks for an og:image/twitter:image meta tag, fetches it
     through the SAME SSRF-guarded net_guard.fetch used for the page itself (an
@@ -141,21 +101,14 @@ def _try_fetch_thumbnail(html_body: bytes, base_url: str) -> dict:
     if not (200 <= img_result.status_code < 300):
         return {}
     try:
-        img = Image.open(BytesIO(img_result.body))
-        img.load()
-        media_id, thumb_id, thumb_w, thumb_h = _store_thumbnail_pair(img)
+        img = media.decode_and_validate(img_result.body)
+        return media.store_image_pair(img)
     except Exception:
         # Deliberately broad: this is decoding/processing arbitrary bytes fetched
         # from an untrusted remote url, which can fail in many Pillow-specific
         # ways (UnidentifiedImageError, OSError, DecompressionBombError, ...). Per
         # spec, ANY failure here degrades to "no thumbnail", never fails the item.
         return {}
-    return {
-        "media_id": media_id,
-        "thumb_media_id": thumb_id,
-        "thumb_w": thumb_w,
-        "thumb_h": thumb_h,
-    }
 
 
 _HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")  # matches app.py's own _HEX_RE exactly
