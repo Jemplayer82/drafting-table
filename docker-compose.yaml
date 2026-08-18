@@ -48,6 +48,9 @@ services:
     <<: *app-common
     command: python -m worker
     pids_limit: 64
+    depends_on:
+      web:
+        condition: service_healthy
 
 volumes:
   dt_data:
