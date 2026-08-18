@@ -508,3 +508,180 @@ def test_resynthesize_project_includes_project_name_in_prompt(
         _make_resynthesis_context(project_name="Named Project")
     )
     assert "# Project: Named Project" in prompts[0]
+
+
+def test_run_claude_vision_argv_uses_stream_json_flags_and_no_positional_prompt(
+    fake_claude, tmp_path
+) -> None:
+    fake_claude(structured_output={"status": "ready"}, stream_json=True)
+    distinctive = "distinctive-vision-prompt-99"
+    result = agent.run_claude(
+        "sys",
+        distinctive,
+        SIMPLE_SCHEMA,
+        image={"media_type": "image/jpeg", "data": "QUJD"},
+    )
+    assert result == {"status": "ready"}
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    argv = json.loads(dump_path.read_text(encoding="utf-8"))["argv"]
+    input_idx = argv.index("--input-format")
+    output_idx = argv.index("--output-format")
+    assert argv[input_idx + 1] == "stream-json"
+    assert argv[output_idx + 1] == "stream-json"
+    assert "--verbose" in argv
+    assert distinctive not in argv
+    assert "--" not in argv
+
+
+def test_run_claude_vision_stdin_envelope_shape(fake_claude, tmp_path) -> None:
+    fake_claude(structured_output={"status": "ready"}, stream_json=True)
+    prompt = "distinctive-vision-prompt-99"
+    image = {"media_type": "image/jpeg", "data": "QUJD"}
+    agent.run_claude("sys", prompt, SIMPLE_SCHEMA, image=image)
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    raw_stdin = json.loads(dump_path.read_text(encoding="utf-8"))["stdin"]
+    envelope = json.loads(raw_stdin)
+    assert envelope["type"] == "user"
+    assert envelope["message"]["role"] == "user"
+    content = envelope["message"]["content"]
+    assert len(content) == 2
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": "QUJD",
+        },
+    }
+    assert content[1] == {"type": "text", "text": prompt}
+
+
+def test_run_claude_without_image_has_empty_stdin(fake_claude, tmp_path) -> None:
+    fake_claude(structured_output={"status": "ready"})
+    agent.run_claude("sys", "prompt", SIMPLE_SCHEMA)
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    dump = json.loads(dump_path.read_text(encoding="utf-8"))
+    assert dump["stdin"] == ""
+
+
+def test_run_claude_vision_ndjson_ignores_non_result_filler_events(fake_claude) -> None:
+    fake_claude(structured_output={"status": "ready"}, stream_json=True)
+    result = agent.run_claude(
+        "sys",
+        "prompt",
+        SIMPLE_SCHEMA,
+        image={
+            "media_type": "image/png",
+            "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        },
+    )
+    assert result == {"status": "ready"}
+
+
+def test_run_claude_vision_ndjson_skips_unparseable_lines(fake_claude) -> None:
+    fake_claude(
+        structured_output={"status": "ready"},
+        stream_json=True,
+        stream_events=["this is not valid json"],
+    )
+    result = agent.run_claude(
+        "sys",
+        "prompt",
+        SIMPLE_SCHEMA,
+        image={"media_type": "image/png", "data": "AAAA"},
+    )
+    assert result == {"status": "ready"}
+
+
+def test_run_claude_vision_no_result_event_raises_agent_process_error(
+    monkeypatch, tmp_path
+) -> None:
+    py_script = tmp_path / "no_result_event.py"
+    py_script.write_text(
+        "import sys\n"
+        "print('{\\\"type\\\": \\\"system\\\"}')\n"
+        "print('{\\\"type\\\": \\\"assistant\\\"}')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    if sys.platform == "win32":
+        ps1 = tmp_path / "no_result_event.ps1"
+        ps1.write_text(
+            f"& '{sys.executable}' '{str(py_script).replace(chr(39), chr(39) + chr(39))}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_BIN", str(ps1))
+    else:
+        py_script.chmod(0o755)
+        monkeypatch.setenv("CLAUDE_BIN", str(py_script))
+
+    with pytest.raises(agent.AgentProcessError) as exc_info:
+        agent.run_claude(
+            "sys",
+            "prompt",
+            SIMPLE_SCHEMA,
+            image={"media_type": "image/png", "data": "AAAA"},
+        )
+    assert "no result event" in str(exc_info.value).lower()
+
+
+def test_run_claude_vision_nonzero_exit_raises_scrubbed_message(fake_claude) -> None:
+    fake_claude(exit_code=1, stderr="boom token=" + "A" * 32, stream_json=True)
+    with pytest.raises(agent.AgentProcessError) as exc_info:
+        agent.run_claude(
+            "sys",
+            "prompt",
+            SIMPLE_SCHEMA,
+            image={"media_type": "image/png", "data": "AAAA"},
+        )
+    message = str(exc_info.value)
+    assert "A" * 32 not in message
+    assert len(message) <= 260
+
+
+def test_run_claude_vision_timeout_kills_whole_process_tree(
+    fake_claude, tmp_path
+) -> None:
+    fake_claude(hang=True)
+    with pytest.raises(agent.AgentTimeoutError):
+        agent.run_claude(
+            "sys",
+            "prompt",
+            SIMPLE_SCHEMA,
+            image={"media_type": "image/png", "data": "AAAA"},
+            timeout_s=2.0,
+        )
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    dump = json.loads(dump_path.read_text(encoding="utf-8"))
+    assert not _pid_alive(dump["pid"])
+    assert "child_pid" in dump
+    assert not _pid_alive(dump["child_pid"])
+
+
+def test_run_claude_vision_env_excludes_dangerous_vars(
+    fake_claude, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("NODE_OPTIONS", "--require /tmp/evil.js")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/evil")
+    monkeypatch.setenv("SESSION_SECRET", "super-secret")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
+    fake_claude(structured_output={"status": "ready"}, stream_json=True)
+    agent.run_claude(
+        "sys",
+        "prompt",
+        SIMPLE_SCHEMA,
+        image={"media_type": "image/png", "data": "AAAA"},
+    )
+
+    dump_path = tmp_path / "fake_claude_dump.json"
+    env = json.loads(dump_path.read_text(encoding="utf-8"))["env"]
+    assert "NODE_OPTIONS" not in env
+    assert "PYTHONPATH" not in env
+    assert "SESSION_SECRET" not in env
+    assert env.get("NO_COLOR") == "1"
+    assert env.get("CI") == "1"
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "test-token"

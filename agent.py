@@ -219,6 +219,7 @@ def run_claude(
     *,
     model: str = "claude-sonnet-5",
     timeout_s: float = 120.0,
+    image: dict | None = None,
 ) -> dict:
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
     # shutil.which() only matches an already-qualified path as-is when its
@@ -235,7 +236,7 @@ def run_claude(
         # Headless claude walks up from cwd discovering .claude/settings.json and
         # CLAUDE.md; .claude/settings.json can define hooks. A dedicated fresh
         # empty temp dir has neither, closing that hole.
-        cmd = _command_for(resolved, [
+        common_leading = [
             "-p",
             "--strict-mcp-config",
             "--setting-sources",
@@ -244,17 +245,40 @@ def run_claude(
             "--no-session-persistence",
             "--tools",
             "",
-            "--output-format",
-            "json",
+        ]
+        common_tail = [
             "--model",
             model,
             "--system-prompt",
             system,
             "--json-schema",
             json.dumps(schema),
-            "--",
-            prompt,
-        ])
+        ]
+
+        use_image = image is not None
+        if use_image:
+            # Vision-mode: prompt moves to the stream-json stdin envelope, so the
+            # CLI takes --input-format/--output-format stream-json and --verbose,
+            # and there is no positional prompt argument (hence no trailing --).
+            cmd = _command_for(resolved, [
+                *common_leading,
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                *common_tail,
+            ])
+        else:
+            # Text-only: identical argv to before, with the prompt guarded by --.
+            cmd = _command_for(resolved, [
+                *common_leading,
+                "--output-format",
+                "json",
+                *common_tail,
+                "--",
+                prompt,
+            ])
         # --strict-mcp-config is required together with --tools "".
         # --tools alone does not stop headless claude from loading user-scope
         # mcpServers and leaking docker containers. The -- must be second-to-last,
@@ -268,7 +292,7 @@ def run_claude(
                 cmd,
                 cwd=cwd,
                 env=env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if use_image else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -296,6 +320,41 @@ def run_claude(
         out_thread.start()
         err_thread.start()
 
+        in_thread: threading.Thread | None = None
+        if use_image:
+
+            def _write_stdin() -> None:
+                try:
+                    envelope = {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": image["media_type"],
+                                        "data": image["data"],
+                                    },
+                                },
+                                {"type": "text", "text": prompt},
+                            ],
+                        },
+                    }
+                    proc.stdin.write(json.dumps(envelope) + "\n")
+                    proc.stdin.flush()
+                except (BrokenPipeError, ValueError, OSError):
+                    pass  # process exited before we could write; already handled
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except (BrokenPipeError, ValueError, OSError):
+                        pass
+
+            in_thread = threading.Thread(target=_write_stdin, daemon=True)
+            in_thread.start()
+
         try:
             proc.wait(timeout=timeout_s)
             timed_out = False
@@ -308,8 +367,20 @@ def run_claude(
 
         out_thread.join(timeout=5.0)
         err_thread.join(timeout=5.0)
-        proc.stdout.close()
-        proc.stderr.close()
+        if in_thread is not None:
+            in_thread.join(timeout=5.0)
+
+        for stream, active in (
+            (proc.stdout, True),
+            (proc.stderr, True),
+            (proc.stdin, use_image),
+        ):
+            if not active or stream is None:
+                continue
+            try:
+                stream.close()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
 
         if timed_out:
             raise AgentTimeoutError(f"claude CLI exceeded {timeout_s:.0f}s timeout")
@@ -320,18 +391,35 @@ def run_claude(
         if proc.returncode != 0:
             raise AgentProcessError(_scrub_error_text(stderr_text or stdout_text))
 
-        stdout_text = stdout_text.strip()
-        if not stdout_text:
-            raise AgentProcessError("claude CLI produced no output")
-        try:
-            envelope = json.loads(stdout_text)
-        except json.JSONDecodeError as exc:
-            raise AgentProcessError(_scrub_error_text(stdout_text)) from exc
+        if use_image:
+            envelope: dict | None = None
+            for line in stdout_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and obj.get("type") == "result":
+                    envelope = obj
+            if envelope is None:
+                raise AgentProcessError(
+                    _scrub_error_text("claude CLI produced no result event on stdout")
+                )
+        else:
+            stdout_text = stdout_text.strip()
+            if not stdout_text:
+                raise AgentProcessError("claude CLI produced no output")
+            try:
+                envelope = json.loads(stdout_text)
+            except json.JSONDecodeError as exc:
+                raise AgentProcessError(_scrub_error_text(stdout_text)) from exc
 
-        if not isinstance(envelope, dict):
-            raise AgentProcessError(
-                _scrub_error_text("claude CLI response was not a JSON object")
-            )
+            if not isinstance(envelope, dict):
+                raise AgentProcessError(
+                    _scrub_error_text("claude CLI response was not a JSON object")
+                )
 
         if envelope.get("is_error"):
             result_msg = str(envelope.get("result") or "claude CLI reported an error")
