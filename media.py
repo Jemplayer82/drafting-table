@@ -127,6 +127,8 @@ def store_full_image(img: Image.Image) -> str:
 
     Returns the new media_id.
     """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     full = img.copy()
     full.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
     return _write_media_file(full, "JPEG", "image/jpeg", "jpg", quality=90)
@@ -137,6 +139,8 @@ def store_thumbnail(img: Image.Image) -> tuple[str, int, int]:
 
     Returns (thumb_media_id, width, height).
     """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     thumb = img.copy()
     thumb.thumbnail((640, 640), Image.Resampling.LANCZOS)
     media_id = _write_media_file(thumb, "WEBP", "image/webp", "webp", quality=82)
