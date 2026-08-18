@@ -171,9 +171,18 @@ def init_db() -> None:
 def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    # busy_timeout MUST be set before journal_mode=WAL, not after: a brand-new
+    # connection's busy_timeout defaults to 0 (fail immediately on contention),
+    # and enabling WAL mode itself needs a brief exclusive lock on the database
+    # header. Setting busy_timeout second left exactly that PRAGMA call with no
+    # retry tolerance -- multiple processes racing to initialize a fresh,
+    # not-yet-existing database file (e.g. gunicorn's multiple workers, or a
+    # separate worker container, all first-booting against an empty volume)
+    # could and did hit `sqlite3.OperationalError: database is locked` right
+    # here, with gunicorn's arbiter escalating that into a full boot failure.
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
     finally:
