@@ -1,7 +1,8 @@
 # Placeholder families used in this file:
-#   PLACEHOLDER_HOST_SECRETS_DIR  -> host directory holding the three secret files
+#   PLACEHOLDER_HOST_SECRETS_DIR   -> host directory holding the three secret files
 #   PLACEHOLDER_NPM_SHARED_NETWORK -> external Docker network shared with NPM
-# Both must be replaced with real values by the deploying orchestrator.
+#   PLACEHOLDER_ADMIN_USERNAME     -> admin username configured for the app
+# All must be replaced with real values by the deploying orchestrator.
 
 x-app-common: &app-common
   image: ghcr.io/jemplayer82/drafting-table:latest
@@ -9,6 +10,7 @@ x-app-common: &app-common
   environment:
     DATA_DIR: /data
     MEDIA_DIR: /media
+    ADMIN_USER: PLACEHOLDER_ADMIN_USERNAME
     ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_password_hash
     SESSION_SECRET_FILE: /run/secrets/session_secret
     CLAUDE_CODE_OAUTH_TOKEN_FILE: /run/secrets/claude_code_oauth_token
