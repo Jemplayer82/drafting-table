@@ -440,3 +440,177 @@ def test_analyze_item_all_inputs_empty_uses_no_content_fallback_prompt(
     assert "No content was provided for this item." in prompts[0]
 
 
+CANNED_RESYNTHESIZE_RESULT = {
+    "direction_md": "d",
+    "open_questions": [{"question": "q", "why": "w"}],
+    "proposed_decisions": [{"decision": "dec", "rationale": "rat"}],
+}
+
+
+def _make_resynthesis_context(**overrides: object) -> dict:
+    base = {
+        "project_name": "Test Project",
+        "items": [
+            {
+                "title": "A",
+                "tag": "tag",
+                "note_md": "note",
+                "source_url": "http://example.com",
+                "kind": "ref",
+                "swatches": [{"hex": "#ffffff", "label": "white"}],
+            }
+        ],
+        "item_count": 1,
+        "accepted_decisions": [],
+        "previous_synthesis": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_resynthesize_project_happy_path_returns_run_claude_result_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    result = agent.resynthesize_project(_make_resynthesis_context())
+    assert result == CANNED_RESYNTHESIZE_RESULT
+
+
+def test_resynthesize_project_passes_180s_timeout_and_the_resynthesize_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, dict, dict[str, object]]] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        calls.append((system, prompt, schema, kwargs))
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.resynthesize_project(_make_resynthesis_context())
+    assert len(calls) == 1
+    _system, _prompt, schema, kwargs = calls[0]
+    assert kwargs["timeout_s"] == 180.0
+    assert schema is agent.RESYNTHESIZE_SCHEMA
+
+
+def test_resynthesize_project_fences_item_content_but_not_trusted_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+
+    context = _make_resynthesis_context(
+        items=[
+            {
+                "title": "ADVERSARIAL-TITLE-MARKER",
+                "tag": "ADVERSARIAL-TAG-MARKER",
+                "note_md": "ADVERSARIAL-NOTE-MARKER",
+                "source_url": "http://example.com/ADVERSARIAL-URL-MARKER",
+                "kind": "ref",
+                "swatches": [],
+            }
+        ],
+        accepted_decisions=[
+            {"body_md": "body TRUSTED-DECISION-MARKER", "rationale_md": None}
+        ],
+        previous_synthesis={
+            "version": 1,
+            "direction_md": "prev direction TRUSTED-PREVDIR-MARKER",
+            "questions_json": '[{"question": "prev question TRUSTED-PREVQ-MARKER"}]',
+        },
+    )
+
+    agent.resynthesize_project(context)
+    prompt = prompts[0]
+
+    match = re.search(
+        r"<<UNTRUSTED-([0-9a-f]{16})>>(.*?)<<END-UNTRUSTED-\1>>",
+        prompt,
+        re.DOTALL,
+    )
+    assert match
+    fenced = match.group(2)
+
+    assert "ADVERSARIAL-TITLE-MARKER" in fenced
+    assert "ADVERSARIAL-TAG-MARKER" in fenced
+    assert "ADVERSARIAL-NOTE-MARKER" in fenced
+    assert "ADVERSARIAL-URL-MARKER" in fenced
+
+    assert "TRUSTED-DECISION-MARKER" in prompt
+    assert "TRUSTED-PREVDIR-MARKER" in prompt
+    assert "TRUSTED-PREVQ-MARKER" in prompt
+
+    trusted_markers = (
+        "TRUSTED-DECISION-MARKER",
+        "TRUSTED-PREVDIR-MARKER",
+        "TRUSTED-PREVQ-MARKER",
+    )
+    for marker in trusted_markers:
+        pos = prompt.index(marker)
+        assert pos < match.start() or pos > match.end()
+
+
+def test_resynthesize_project_handles_missing_previous_synthesis_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.resynthesize_project(_make_resynthesis_context(previous_synthesis=None))
+    assert "no previous synthesis exists" in prompts[0]
+
+
+def test_resynthesize_project_handles_empty_accepted_decisions_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.resynthesize_project(_make_resynthesis_context(accepted_decisions=[]))
+    assert "(none settled yet)" in prompts[0]
+
+
+def test_resynthesize_project_handles_empty_items_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.resynthesize_project(_make_resynthesis_context(items=[], item_count=0))
+    assert "(no reference items)" in prompts[0]
+
+
+def test_resynthesize_project_includes_project_name_in_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_RESYNTHESIZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.resynthesize_project(
+        _make_resynthesis_context(project_name="Named Project")
+    )
+    assert "# Project: Named Project" in prompts[0]
