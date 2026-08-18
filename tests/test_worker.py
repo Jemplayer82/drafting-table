@@ -12,6 +12,7 @@ import importlib
 import ipaddress
 import json
 import os
+import secrets
 import socket as socket_module
 from io import BytesIO
 from urllib.parse import urlsplit
@@ -48,12 +49,13 @@ def _insert_item(
     status="pending",
     title=None,
     error=None,
+    media_id=None,
 ):
     cur = conn.execute(
         """
         INSERT INTO items (project_id, kind, raw_text, source_url, status,
-                           title, error, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           title, error, media_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
@@ -63,6 +65,7 @@ def _insert_item(
             status,
             title,
             error,
+            media_id,
             _now_iso(),
             _now_iso(),
         ),
@@ -297,7 +300,9 @@ def _fresh_db(app_env):
 @pytest.fixture(autouse=True)
 def _mock_analyze_item(monkeypatch, _fresh_db):
     def _fake(
-        *, title_hint=None, url=None, page_text=None, user_note=None, image_bytes=None, image_media_type=None
+        *,
+        title_hint=None, url=None, page_text=None, user_note=None,
+        image_bytes=None, image_media_type=None,
     ):
         return {
             "title": title_hint or "Mock Title",
@@ -1298,6 +1303,147 @@ def test_run_ingest_job_url_kind_non_2xx_status_fails_with_status_code_and_no_ch
         item = db.get_item(item_id)
         assert item["status"] == "failed"
         assert "404" in item["error"]
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_image_kind_happy_path(monkeypatch):
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return {
+            "title": "Image Title",
+            "tag": "image-tag",
+            "note": "Image note.",
+            "swatches": [{"hex": "#112233", "label": "dark"}],
+            "confidence": "medium",
+            "alt_text": "Image alt text.",
+        }
+
+    monkeypatch.setattr(agent, "analyze_item", fake)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("image-happy", "")
+        media_id = secrets.token_hex(16)
+        rel_path = f"{media_id[:2]}/{media_id}.jpg"
+        full_path = db.MEDIA_DIR / rel_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(_TEST_JPEG)
+        db.insert_media(media_id, rel_path, "image/jpeg", 300, 200, len(_TEST_JPEG))
+
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="image",
+            media_id=media_id,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "ready"
+        assert item["title"] == "Image Title"
+        assert item["tag"] == "image-tag"
+        assert item["note_md"] == "Image note."
+        assert item["alt_text"] == "Image alt text."
+        assert item["media_id"] == media_id
+        assert item["thumb_media_id"] is not None
+        rows = conn.execute(
+            "SELECT hex, label FROM swatches WHERE item_id = ?",
+            (item_id,),
+        ).fetchall()
+        assert [(r["hex"], r["label"]) for r in rows] == [("#112233", "dark")]
+        assert calls == [
+            {
+                "title_hint": None,
+                "url": None,
+                "page_text": None,
+                "user_note": None,
+                "image_bytes": _TEST_JPEG,
+                "image_media_type": "image/jpeg",
+            }
+        ]
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 1
+
+
+def test_run_ingest_job_image_kind_missing_media_fails_generic_no_chain():
+    with db.connect() as conn:
+        project_id, _ = db.create_project("image-missing", "")
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="image",
+            media_id="nonexistent-media-id",
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "stored image was missing"
+
+        chained = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM jobs
+            WHERE kind = 'resynthesize' AND project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        assert chained["c"] == 0
+
+
+def test_run_ingest_job_image_kind_analyze_item_failure_fails_job_generically_no_chain(
+    monkeypatch,
+):
+    def _raise(**kw):
+        raise agent.AgentError("boom: internal detail sk-fake-token-1234567890")
+
+    monkeypatch.setattr(agent, "analyze_item", _raise)
+    with db.connect() as conn:
+        project_id, _ = db.create_project("image-fail", "")
+        media_id = secrets.token_hex(16)
+        rel_path = f"{media_id[:2]}/{media_id}.jpg"
+        full_path = db.MEDIA_DIR / rel_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(_TEST_JPEG)
+        db.insert_media(media_id, rel_path, "image/jpeg", 300, 200, len(_TEST_JPEG))
+
+        item_id = _insert_item(
+            conn,
+            project_id=project_id,
+            kind="image",
+            media_id=media_id,
+            status="pending",
+        )
+        _insert_job(conn, kind="ingest", project_id=project_id, item_id=item_id)
+        job = db.claim_next_job("worker-x")
+        worker.run_ingest_job(job, sleep=_noop_sleep)
+
+        item = db.get_item(item_id)
+        assert item["status"] == "failed"
+        assert item["error"] == "analysis failed"
+        lowered = item["error"].lower()
+        for leaked in ("boom", "internal detail", "sk-fake-token"):
+            assert leaked not in lowered
 
         chained = conn.execute(
             """

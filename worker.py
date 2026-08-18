@@ -16,9 +16,11 @@ import re
 import secrets
 import sys
 import time
+from io import BytesIO
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
+from PIL import Image
 
 import agent
 import db
@@ -114,7 +116,9 @@ def _try_fetch_thumbnail(html_body: bytes, base_url: str) -> dict:
 _HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")  # matches app.py's own _HEX_RE exactly
 
 
-def _run_analysis_or_fail(job, *, title_hint, url, page_text, user_note) -> dict | None:
+def _run_analysis_or_fail(
+    job, *, title_hint, url, page_text, user_note, image_bytes=None, image_media_type=None
+) -> dict | None:
     """Calls agent.analyze_item with the given inputs.
 
     On ANY agent.AgentError (timeout, nonzero exit, schema validation failure,
@@ -126,10 +130,17 @@ def _run_analysis_or_fail(job, *, title_hint, url, page_text, user_note) -> dict
 
     On success returns the validated analysis dict unchanged.
     """
+    kwargs = {
+        "title_hint": title_hint,
+        "url": url,
+        "page_text": page_text,
+        "user_note": user_note,
+    }
+    if image_bytes is not None:
+        kwargs["image_bytes"] = image_bytes
+        kwargs["image_media_type"] = image_media_type
     try:
-        return agent.analyze_item(
-            title_hint=title_hint, url=url, page_text=page_text, user_note=user_note
-        )
+        return agent.analyze_item(**kwargs)
     except agent.AgentError as exc:
         print(f"ingest job {job['id']} analysis failed: {exc}", file=sys.stderr)
         db.fail_job(job["id"], job["item_id"], "analysis failed")
@@ -188,16 +199,77 @@ def _run_url_ingest(job, item, *, sleep) -> None:
     db.chain_resynthesize_job(job["project_id"], trigger_item_id=job["item_id"])
 
 
+def _run_image_ingest(job, item, *, sleep) -> None:
+    db.set_job_phase(job["id"], "fetch")
+    media_row = db.get_media(item["media_id"]) if item["media_id"] else None
+    if media_row is None:
+        db.fail_job(job["id"], job["item_id"], "stored image was missing")
+        return
+    try:
+        image_bytes = (db.MEDIA_DIR / media_row["path"]).read_bytes()
+    except (OSError, FileNotFoundError):
+        db.fail_job(job["id"], job["item_id"], "stored image was missing")
+        return
+    sleep(PHASE_SLEEP_SECONDS)
+
+    db.set_job_phase(job["id"], "analyze")
+    analysis = _run_analysis_or_fail(
+        job,
+        title_hint=None,
+        url=None,
+        page_text=None,
+        user_note=None,
+        image_bytes=image_bytes,
+        image_media_type=media_row["mime"],
+    )
+    if analysis is None:
+        return
+
+    db.set_job_phase(job["id"], "persist")
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        img.load()
+        thumb_id, thumb_w, thumb_h = media.store_thumbnail(img)
+        thumb_fields = {"thumb_media_id": thumb_id, "thumb_w": thumb_w, "thumb_h": thumb_h}
+    except Exception:
+        thumb_fields = {}
+    sleep(PHASE_SLEEP_SECONDS)
+
+    item = db.get_item(job["item_id"])
+    if item is None:
+        db.fail_job(
+            job["id"], job["item_id"], f"item {job['item_id']} was deleted before ingest completed"
+        )
+        return
+
+    swatches = [sw for sw in analysis["swatches"] if _HEX_RE.fullmatch(sw["hex"])]
+    db.complete_ingest_job(
+        job["id"],
+        job["item_id"],
+        analysis["title"],
+        tag=analysis["tag"],
+        note_md=analysis["note"],
+        alt_text=analysis.get("alt_text"),
+        media_id=item["media_id"],
+        **thumb_fields,
+    )
+    db.replace_swatches(job["item_id"], swatches)
+    db.chain_resynthesize_job(job["project_id"], trigger_item_id=job["item_id"])
+
+
 def run_ingest_job(job, *, sleep=time.sleep) -> None:
     """Ingest handler for an already-claimed job row/dict.
 
-    Both 'note' and 'url' items run a real agent.analyze_item() call during the
-    'analyze' phase. If agent.analyze_item() raises any agent.AgentError, the job
-    is failed with the generic message 'analysis failed', no CLI-derived details
-    are surfaced, and no resynthesize job is chained.
+    'note', 'url', and 'image' items run a real agent.analyze_item() call during
+    the 'analyze' phase. If agent.analyze_item() raises any agent.AgentError,
+    the job is failed with the generic message 'analysis failed', no CLI-derived
+    details are surfaced, and no resynthesize job is chained.
 
     'url' items additionally fetch the page via net_guard, extract visible body
     text and an optional og:image thumbnail, and pass those into the analysis.
+
+    'image' items read the already-uploaded image file from disk and pass its
+    bytes into the analysis, then derive a thumbnail from the same bytes.
     """
     item = db.get_item(job["item_id"])
     if item is None:
@@ -208,6 +280,10 @@ def run_ingest_job(job, *, sleep=time.sleep) -> None:
 
     if item["kind"] == "url":
         _run_url_ingest(job, item, sleep=sleep)
+        return
+
+    if item["kind"] == "image":
+        _run_image_ingest(job, item, sleep=sleep)
         return
 
     for phase in ("fetch", "analyze", "persist"):
