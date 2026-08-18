@@ -196,7 +196,6 @@ def _run_url_ingest(job, item, *, sleep) -> None:
 
     db.set_job_phase(job["id"], "analyze")
     title_hint, _image_url, page_text = _parse_page(result.body)
-    media_fields = _try_fetch_thumbnail(result.body, result.final_url)
     analysis = _run_analysis_or_fail(
         job,
         title_hint=title_hint,
@@ -206,6 +205,7 @@ def _run_url_ingest(job, item, *, sleep) -> None:
     )
     if analysis is None:
         return
+    media_fields = _try_fetch_thumbnail(result.body, result.final_url)
     sleep(PHASE_SLEEP_SECONDS)
 
     db.set_job_phase(job["id"], "persist")
