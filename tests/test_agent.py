@@ -391,3 +391,21 @@ def test_analyze_item_url_kind_call_includes_title_hint_url_and_page_text(
     assert marker_positions[0] < prompt.index("Some Title")
     assert marker_positions[1] < prompt.index("body text here")
 
+
+def test_analyze_item_all_inputs_empty_uses_no_content_fallback_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    def fake(system: str, prompt: str, schema: dict, **kwargs: object) -> dict:
+        prompts.append(prompt)
+        return CANNED_ANALYZE_RESULT
+
+    monkeypatch.setattr(agent, "run_claude", fake)
+    agent.analyze_item(
+        title_hint=None, url=None, page_text=None, user_note=None
+    )
+
+    assert "No content was provided for this item." in prompts[0]
+
+
