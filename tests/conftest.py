@@ -46,6 +46,11 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         def main() -> None:
             _write_dump()
             recipe = json.loads(_RECIPE_PATH.read_text(encoding="utf-8"))
+            try:
+                stdin_data = sys.stdin.read()
+            except Exception:
+                stdin_data = ""
+            _write_dump({"stdin": stdin_data})
             if recipe.get("hang"):
                 if sys.platform == "win32":
                     try:
@@ -70,8 +75,19 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 exit_code = recipe.get("exit_code", 0)
                 if exit_code:
                     sys.exit(exit_code)
-                print(json.dumps(recipe["envelope"]))
-                sys.exit(0)
+                if recipe.get("stream_json"):
+                    for event in recipe.get("stream_events", []):
+                        if isinstance(event, dict):
+                            print(json.dumps(event))
+                        else:
+                            print(event)
+                        sys.stdout.flush()
+                    print(json.dumps(recipe["envelope"]))
+                    sys.stdout.flush()
+                    sys.exit(0)
+                else:
+                    print(json.dumps(recipe["envelope"]))
+                    sys.exit(0)
 
 
         if __name__ == "__main__":
@@ -110,6 +126,8 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         exit_code: int = 0,
         stderr: str = "",
         hang: bool = False,
+        stream_json: bool = False,
+        stream_events: list[dict | str] | None = None,
     ) -> None:
         if structured_output_field is _STRUCTURED_OUTPUT_DEFAULT:
             structured_output_field = structured_output
@@ -122,11 +140,24 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "structured_output": structured_output_field,
             "result": result,
         }
+        if stream_json and stream_events is None:
+            stream_events = [
+                {"type": "system", "subtype": "init", "session_id": "fake-session"},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "(thinking)"}],
+                    },
+                },
+            ]
         recipe = {
             "envelope": envelope,
             "exit_code": exit_code,
             "stderr": stderr,
             "hang": hang,
+            "stream_json": stream_json,
+            "stream_events": stream_events or [],
         }
         recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
         monkeypatch.setenv("CLAUDE_BIN", str(launcher_path))
