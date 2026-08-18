@@ -10,6 +10,7 @@ import datetime
 import http.server
 import importlib
 import ipaddress
+import os
 import socket as socket_module
 from io import BytesIO
 from urllib.parse import urlsplit
@@ -1074,3 +1075,24 @@ def test_main_exits_nonzero_without_oauth_token(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         worker.main()
     assert exc_info.value.code != 0
+
+
+def test_load_secret_from_file_or_env_reads_file_and_strips_whitespace(
+    tmp_path, monkeypatch
+):
+    secret_file = tmp_path / "oauth-token.txt"
+    # Real mounted secret files typically end with a trailing newline; include
+    # leading/trailing whitespace to prove .strip() is actually applied.
+    secret_file.write_text(
+        "  mounted-oauth-token-from-file\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN_FILE", str(secret_file))
+
+    worker._load_secret_from_file_or_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+    assert (
+        os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
+        == "mounted-oauth-token-from-file"
+    )
