@@ -19,6 +19,18 @@ SIMPLE_SCHEMA = {
     "properties": {"status": {"type": "string", "maxLength": 20}},
 }
 
+RICH_SCHEMA = {
+    "type": "object",
+    "required": ["status", "mode"],
+    "additionalProperties": False,
+    "properties": {
+        "status": {"type": "string", "maxLength": 20},
+        "mode": {"type": "string", "enum": ["on", "off", "auto"]},
+        "tags": {"type": "array", "maxItems": 2, "items": {"type": "string", "maxLength": 10}},
+        "code": {"type": "string", "pattern": r"[a-z]{3}"},
+    },
+}
+
 
 @pytest.fixture
 def fake_claude(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
@@ -151,6 +163,48 @@ def test_run_claude_rejects_schema_violating_response_without_coercing(fake_clau
     fake_claude(structured_output={"status": "x" * 999})
     with pytest.raises(agent.AgentValidationError):
         agent.run_claude("sys", "prompt", SIMPLE_SCHEMA)
+
+
+def test_run_claude_rejects_response_missing_a_required_field(fake_claude) -> None:
+    fake_claude(structured_output={"mode": "on"})
+    with pytest.raises(agent.AgentValidationError):
+        agent.run_claude("sys", "prompt", RICH_SCHEMA)
+
+
+def test_run_claude_rejects_response_with_an_extra_property_when_additional_properties_are_false(
+    fake_claude,
+) -> None:
+    fake_claude(structured_output={"status": "ready", "mode": "on", "extra": "bad"})
+    with pytest.raises(agent.AgentValidationError):
+        agent.run_claude("sys", "prompt", RICH_SCHEMA)
+
+
+def test_run_claude_rejects_response_whose_array_field_exceeds_max_items(fake_claude) -> None:
+    fake_claude(
+        structured_output={"status": "ready", "mode": "on", "tags": ["a", "b", "c"]}
+    )
+    with pytest.raises(agent.AgentValidationError):
+        agent.run_claude("sys", "prompt", RICH_SCHEMA)
+
+
+def test_run_claude_rejects_response_whose_string_field_fails_the_pattern(fake_claude) -> None:
+    fake_claude(structured_output={"status": "ready", "mode": "on", "code": "AB"})
+    with pytest.raises(agent.AgentValidationError):
+        agent.run_claude("sys", "prompt", RICH_SCHEMA)
+
+
+def test_run_claude_accepts_string_that_contains_but_is_not_fully_matched_by_the_pattern(
+    fake_claude,
+) -> None:
+    fake_claude(structured_output={"status": "ready", "mode": "on", "code": "xabcy"})
+    result = agent.run_claude("sys", "prompt", RICH_SCHEMA)
+    assert result == {"status": "ready", "mode": "on", "code": "xabcy"}
+
+
+def test_run_claude_rejects_response_whose_string_field_is_not_in_the_enum(fake_claude) -> None:
+    fake_claude(structured_output={"status": "ready", "mode": "standby", "code": "abc"})
+    with pytest.raises(agent.AgentValidationError):
+        agent.run_claude("sys", "prompt", RICH_SCHEMA)
 
 
 def test_run_claude_nonzero_exit_raises_scrubbed_message(fake_claude) -> None:
@@ -311,3 +365,4 @@ def test_analyze_item_url_kind_call_includes_title_hint_url_and_page_text(
     assert len(marker_positions) == 2
     assert marker_positions[0] < prompt.index("Some Title")
     assert marker_positions[1] < prompt.index("body text here")
+
