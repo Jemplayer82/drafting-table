@@ -174,6 +174,15 @@ def _validate_against_schema(value: object, schema: dict, path: str = "$") -> No
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             raise AgentValidationError(f"{path}: string exceeds maxLength")
         if "pattern" in schema and not re.search(schema["pattern"], value):
+            # search, not fullmatch: JSON Schema's `pattern` keyword is an
+            # unanchored substring match per spec -- a schema author who wants
+            # a full-string bound writes ^...$ themselves (as ANALYZE_ITEM_SCHEMA's
+            # hex pattern does). Note Python's `$` matches just before a trailing
+            # newline even inside ^...$, so a value like "#123456\n" could still
+            # pass here -- this is why every actual write site (worker.py,
+            # app.py) re-validates hex values with re.fullmatch() before they
+            # ever reach the database; this generic validator is a first-pass
+            # sanity check, not the security boundary for that field.
             raise AgentValidationError(f"{path}: string does not match pattern")
         if "enum" in schema and value not in schema["enum"]:
             raise AgentValidationError(f"{path}: string not in enum")
