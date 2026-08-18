@@ -40,6 +40,8 @@ _ENV_ALLOWLIST = (
     "TEMP",
     "TMP",
 )
+if sys.platform == "win32":
+    _ENV_ALLOWLIST += ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
 
 
 def _build_subprocess_env() -> dict[str, str]:
@@ -50,8 +52,16 @@ def _build_subprocess_env() -> dict[str, str]:
     LD_PRELOAD, LD_LIBRARY_PATH, PYTHONPATH, and app secrets such as
     SESSION_SECRET or ADMIN_PASSWORD_HASH are excluded automatically.
     `_ENV_ALLOWLIST` must never be widened to include NODE_OPTIONS.
+
+    On Windows, SYSTEMROOT (plus WINDIR, COMSPEC, and PATHEXT) is also passed,
+    case-insensitively: the Winsock provider chain requires SystemRoot to be
+    present for any networking call to initialize.
     """
-    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST and v}
+    if sys.platform == "win32":
+        allowed = {name.upper() for name in _ENV_ALLOWLIST}
+        env = {k: v for k, v in os.environ.items() if k.upper() in allowed and v}
+    else:
+        env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST and v}
     env["NO_COLOR"] = "1"
     env["CI"] = "1"
     return env
