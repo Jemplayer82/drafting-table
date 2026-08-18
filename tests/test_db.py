@@ -694,6 +694,7 @@ def test_complete_ingest_job_leaves_media_fields_null_by_default(app_env):
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     assert item["status"] == "ready"
     assert item["title"] == "Plain Title"
+    assert item["alt_text"] is None
     assert item["media_id"] is None
     assert item["thumb_media_id"] is None
     assert item["thumb_w"] is None
@@ -724,6 +725,30 @@ def test_complete_ingest_job_writes_tag_and_note_md_when_provided(app_env):
     assert item["title"] == "A Title"
     assert item["tag"] == "moody-teal"
     assert item["note_md"] == "Some analysis prose."
+
+
+def test_complete_ingest_job_sets_alt_text_when_provided(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Complete Ingest Alt Text", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+        job_id = _insert_job(conn, pid, db, kind="ingest", status="running", item_id=item_id)
+
+    db.complete_ingest_job(
+        job_id,
+        item_id,
+        "A Title",
+        alt_text="A descriptive alt text.",
+    )
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    assert item["status"] == "ready"
+    assert item["title"] == "A Title"
+    assert item["alt_text"] == "A descriptive alt text."
 
 
 def test_complete_job_marks_job_done_without_touching_items_or_syntheses(app_env):
@@ -1110,6 +1135,58 @@ def test_create_url_and_ingest_job_position_zero_when_project_has_no_items(app_e
     assert item["position"] == 0
 
 
+def test_create_image_and_ingest_job_creates_image_kind_item_with_media_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Image Drop", None)
+    media_id = "deadbeef11223344"
+    db.insert_media(
+        media_id=media_id,
+        path="2024/01/image.jpg",
+        mime="image/jpeg",
+        width=1200,
+        height=900,
+        byte_size=45678,
+    )
+
+    item_id, job_id = db.create_image_and_ingest_job(pid, media_id)
+
+    with db.connect() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert item["project_id"] == pid
+    assert item["kind"] == "image"
+    assert item["status"] == "pending"
+    assert item["media_id"] == media_id
+    assert item["raw_text"] is None
+    assert item["source_url"] is None
+    assert item["thumb_media_id"] is None
+    assert item["thumb_w"] is None
+    assert item["thumb_h"] is None
+    assert job["project_id"] == pid
+    assert job["item_id"] == item_id
+    assert job["kind"] == "ingest"
+    assert job["status"] == "queued"
+
+
+def test_create_image_and_ingest_job_position_zero_when_project_has_no_items(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Image Zero", None)
+
+    item_id, job_id = db.create_image_and_ingest_job(pid, "deadbeef11223344")
+
+    with db.connect() as conn:
+        item = conn.execute(
+            "SELECT position FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+    assert item["position"] == 0
+
+
 def test_list_active_jobs_only_returns_queued_and_running_for_the_given_project(app_env):
     import db
 
@@ -1237,6 +1314,39 @@ def test_insert_media_inserts_row_matching_given_fields(app_env):
     assert row["height"] == 900
     assert row["byte_size"] == 45678
     assert row["created_at"] is not None
+
+
+def test_get_media_returns_row_for_existing_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    db.insert_media(
+        media_id="aabbccdd11223344",
+        path="2024/01/image.jpg",
+        mime="image/jpeg",
+        width=1200,
+        height=900,
+        byte_size=45678,
+    )
+
+    row = db.get_media("aabbccdd11223344")
+
+    assert row is not None
+    assert row["id"] == "aabbccdd11223344"
+    assert row["path"] == "2024/01/image.jpg"
+    assert row["mime"] == "image/jpeg"
+    assert row["width"] == 1200
+    assert row["height"] == 900
+    assert row["byte_size"] == 45678
+
+
+def test_get_media_returns_none_for_missing_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    assert db.get_media("nonexistent-media-id") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1466,6 +1576,7 @@ def test_get_resynthesis_context_project_name_matches(app_env):
 
 def test_get_resynthesis_context_rollback_on_mid_transaction_failure(app_env, monkeypatch):
     import sqlite3
+
     import db
 
     importlib.reload(db)
@@ -1495,7 +1606,7 @@ def test_get_resynthesis_context_rollback_on_mid_transaction_failure(app_env, mo
         db.get_resynthesis_context(pid)
     except RuntimeError as exc:
         if "injected swatches failure" not in str(exc):
-            raise AssertionError(f"unexpected RuntimeError: {exc}")
+            raise AssertionError(f"unexpected RuntimeError: {exc}") from exc
     else:
         raise AssertionError("expected injected RuntimeError to propagate")
 
@@ -1712,6 +1823,7 @@ def test_insert_synthesis_propagates_integrity_error_on_unique_violation(
     app_env, monkeypatch
 ):
     import sqlite3
+
     import db
 
     importlib.reload(db)
@@ -1738,7 +1850,7 @@ def test_insert_synthesis_propagates_integrity_error_on_unique_violation(
         db.insert_synthesis(pid, "dir", "[]", 1, None, 1)
     except sqlite3.IntegrityError as exc:
         if "UNIQUE constraint failed" not in str(exc):
-            raise AssertionError(f"unexpected sqlite3.IntegrityError: {exc}")
+            raise AssertionError(f"unexpected sqlite3.IntegrityError: {exc}") from exc
     else:
         raise AssertionError(
             "expected sqlite3.IntegrityError to propagate from insert_synthesis"

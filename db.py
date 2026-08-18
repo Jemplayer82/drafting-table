@@ -481,27 +481,31 @@ def complete_ingest_job(
     *,
     tag: str | None = None,
     note_md: str | None = None,
+    alt_text: str | None = None,
     media_id: str | None = None,
     thumb_media_id: str | None = None,
     thumb_w: int | None = None,
     thumb_h: int | None = None,
 ) -> None:
     """Marks an ingest item as ready with its extracted title and optional
-    analyze_item()-derived tag and note_md, plus (for url items with a fetched
-    og:image) its media fields. tag, note_md, and all four media fields default
-    to None -- the existing 3-positional-arg call shape is unaffected and
-    continues to leave those columns NULL exactly as before. Keeping
-    title+tag+note_md+media fields in one atomic UPDATE avoids a second
-    update_item round-trip. Both updates share one timestamp and run in one
-    transaction."""
+    analyze_item()-derived tag, note_md, and alt_text, plus (for url items with a
+    fetched og:image) its media fields. tag, note_md, alt_text, and all four
+    media fields default to None -- the existing 3-positional-arg call shape is
+    unaffected and continues to leave those columns NULL exactly as before.
+    Keeping title+tag+note_md+alt_text+media fields in one atomic UPDATE avoids
+    a second update_item round-trip. Both updates share one timestamp and run in
+    one transaction."""
     now = _now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
-                "UPDATE items SET status='ready', title=?, tag=?, note_md=?, media_id=?, "
-                "thumb_media_id=?, thumb_w=?, thumb_h=?, updated_at=? WHERE id=?",
-                (title, tag, note_md, media_id, thumb_media_id, thumb_w, thumb_h, now, item_id),
+                "UPDATE items SET status='ready', title=?, tag=?, note_md=?, alt_text=?, "
+                "media_id=?, thumb_media_id=?, thumb_w=?, thumb_h=?, updated_at=? WHERE id=?",
+                (
+                    title, tag, note_md, alt_text, media_id,
+                    thumb_media_id, thumb_w, thumb_h, now, item_id,
+                ),
             )
             conn.execute(
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=? WHERE id=?",
@@ -602,6 +606,12 @@ def get_item(item_id: int) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
 
 
+def get_media(media_id: str) -> sqlite3.Row | None:
+    """Returns the full media row for media_id, or None if it doesn't exist."""
+    with connect() as conn:
+        return conn.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
+
+
 def _create_item_and_ingest_job(
     project_id: int, kind: str, **item_fields: object
 ) -> tuple[int, int]:
@@ -656,6 +666,10 @@ def create_note_and_ingest_job(project_id: int, raw_text: str) -> tuple[int, int
 
 def create_url_and_ingest_job(project_id: int, source_url: str) -> tuple[int, int]:
     return _create_item_and_ingest_job(project_id, "url", source_url=source_url)
+
+
+def create_image_and_ingest_job(project_id: int, media_id: str) -> tuple[int, int]:
+    return _create_item_and_ingest_job(project_id, "image", media_id=media_id)
 
 
 def list_active_jobs(project_id: int) -> list[sqlite3.Row]:
