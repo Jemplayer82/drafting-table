@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import json
 import os
-import pathlib
 import re
 import subprocess
 import sys
@@ -30,118 +28,6 @@ RICH_SCHEMA = {
         "code": {"type": "string", "pattern": r"[a-z]{3}"},
     },
 }
-
-
-_STRUCTURED_OUTPUT_DEFAULT = object()
-
-
-@pytest.fixture
-def fake_claude(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
-    impl_path = tmp_path / "fake_claude_impl.py"
-    recipe_path = tmp_path / "fake_claude_recipe.json"
-
-    impl_source = inspect.cleandoc(
-        """
-        from __future__ import annotations
-
-        import json
-        import os
-        import signal
-        import subprocess
-        import sys
-        import time
-        from pathlib import Path
-
-        _RECIPE_PATH = Path(__file__).resolve().parent / "fake_claude_recipe.json"
-        _DUMP_PATH = Path(__file__).resolve().parent / "fake_claude_dump.json"
-
-
-        def _write_dump(extra: dict | None = None) -> None:
-            state = {"argv": sys.argv, "env": dict(os.environ), "pid": os.getpid()}
-            if extra:
-                state.update(extra)
-            _DUMP_PATH.write_text(json.dumps(state), encoding="utf-8")
-
-
-        def main() -> None:
-            _write_dump()
-            recipe = json.loads(_RECIPE_PATH.read_text(encoding="utf-8"))
-            if recipe.get("hang"):
-                if sys.platform == "win32":
-                    try:
-                        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
-                    except (OSError, ValueError):
-                        pass
-                else:
-                    try:
-                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                    except (OSError, ValueError):
-                        pass
-                child = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(9999)"]
-                )
-                _write_dump({"child_pid": child.pid})
-                time.sleep(9999)
-            else:
-                stderr = recipe.get("stderr", "")
-                if stderr:
-                    sys.stderr.write(stderr)
-                    sys.stderr.flush()
-                exit_code = recipe.get("exit_code", 0)
-                if exit_code:
-                    sys.exit(exit_code)
-                print(json.dumps(recipe["envelope"]))
-                sys.exit(0)
-
-
-        if __name__ == "__main__":
-            main()
-        """
-    )
-    impl_path.write_text(impl_source, encoding="utf-8")
-
-    if sys.platform == "win32":
-        launcher_path = tmp_path / "fake_claude.cmd"
-        launcher_body = f'@echo off\n"{sys.executable}" "{impl_path}" %*\n'
-    else:
-        launcher_path = tmp_path / "fake_claude"
-        shebang = f"#!{sys.executable}"
-        runpy_line = f"import runpy; runpy.run_path(r'{impl_path}', run_name='__main__')"
-        launcher_body = f"{shebang}\n{runpy_line}\n"
-        launcher_path.chmod(0o755)
-    launcher_path.write_text(launcher_body, encoding="utf-8")
-
-    def configure(
-        *,
-        structured_output: dict | None = None,
-        is_error: bool = False,
-        result: str | None = None,
-        structured_output_field: object = _STRUCTURED_OUTPUT_DEFAULT,
-        exit_code: int = 0,
-        stderr: str = "",
-        hang: bool = False,
-    ) -> None:
-        if structured_output_field is _STRUCTURED_OUTPUT_DEFAULT:
-            structured_output_field = structured_output
-        if result is None:
-            result = json.dumps(structured_output) if structured_output is not None else ""
-        envelope = {
-            "type": "result",
-            "subtype": "success",
-            "is_error": is_error,
-            "structured_output": structured_output_field,
-            "result": result,
-        }
-        recipe = {
-            "envelope": envelope,
-            "exit_code": exit_code,
-            "stderr": stderr,
-            "hang": hang,
-        }
-        recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_BIN", str(launcher_path))
-
-    return configure
 
 
 def _pid_alive(pid: int) -> bool:
