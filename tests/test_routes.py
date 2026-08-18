@@ -259,3 +259,45 @@ def test_project_page_omits_version_suffix_when_no_synthesis_exists(logged_in_cl
     resp = logged_in_client.get(f"/p/{slug}")
     assert resp.status_code == 200
     assert b'&middot; v' not in resp.data
+
+
+def test_project_page_renders_drop_and_upload_forms(logged_in_client):
+    import db
+
+    resp = logged_in_client.get("/p/jemplayer82-web-design-ideas")
+    assert resp.status_code == 200
+
+    with db.connect() as conn:
+        project_id = conn.execute(
+            "SELECT id FROM projects WHERE slug = ?",
+            ("jemplayer82-web-design-ideas",),
+        ).fetchone()["id"]
+
+    # The new image-upload form.
+    upload_action = f"/api/projects/{project_id}/upload".encode()
+    upload_form_re = re.compile(
+        rb'<form[^>]*action="' + re.escape(upload_action) + rb'"[^>]*>(.*?)</form>',
+        re.DOTALL,
+    )
+    upload_match = upload_form_re.search(resp.data)
+    assert upload_match, "expected the image upload form"
+    upload_body = upload_match.group(1)
+    assert b'enctype="multipart/form-data"' in upload_match.group(0)
+    assert b'<input type="file"' in upload_body
+    assert b'name="file"' in upload_body
+    assert b'<input type="hidden" name="csrf_token"' in upload_body
+
+    # The existing raw_text drop form, unchanged.
+    drop_action = f"/api/projects/{project_id}/drop".encode()
+    drop_form_re = re.compile(
+        rb'<form[^>]*action="' + re.escape(drop_action) + rb'"[^>]*>(.*?)</form>',
+        re.DOTALL,
+    )
+    drop_match = drop_form_re.search(resp.data)
+    assert drop_match, "expected the raw_text drop form"
+    drop_body = drop_match.group(1)
+    assert b'<textarea' in drop_body
+    assert b'name="raw_text"' in drop_body
+    assert b'<button type="submit"' in drop_body
+    assert b'>drop</button>' in drop_body
+    assert b'type="file"' not in drop_body

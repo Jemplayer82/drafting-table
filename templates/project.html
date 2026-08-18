@@ -76,6 +76,11 @@
           <textarea class="fc-input" name="raw_text" rows="3" placeholder="Drop a note..." required></textarea>
           <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">drop</button>
         </form>
+        <form method="post" action="/api/projects/{{ project.id }}/upload" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{{ g.session.csrf_token }}">
+          <input type="file" class="fc-input" name="file" accept="image/*" required>
+          <button type="submit" class="fc-btn fc-btn--primary fc-btn--sm">upload image</button>
+        </form>
       </div>
     </div>
 
