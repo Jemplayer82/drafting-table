@@ -4,6 +4,44 @@ This file tracks manual verification steps required by the project's phase plans
 
 ---
 
+## Phase 7 — Step 7: real end-to-end re-synthesis verification
+
+**Status:** PASSED (2026-08-18)
+
+**Observed:** Ran web+worker with a real `CLAUDE_CODE_OAUTH_TOKEN` against the
+project seeded from the real artifact export (`Studio Portfolio Site`, which
+starts with 2 ready items, 2 user-accepted decisions, and a seed-imported v1
+synthesis). Dropped a real URL (`https://linear.app`) through the API to
+cross the 3-item resynthesis threshold. The ingest job produced a genuinely
+AI-authored item (title "Linear's numbered-stage product tour (1.0 Intake →
+5.0 Monitor)", tag `pipeline-narrative`, a specific multi-sentence note
+correctly identifying the actual page structure) with `swatches=[]` as
+expected for a text-only call. The chained resynthesize job then produced a
+`syntheses` row at `version=2` (up from seed-imported `version=1`) with
+`item_count=3` and `trigger_item_id` set to the new item's id. `direction_md`
+was completely rewritten from scratch — not edited or extended — explicitly
+naming and reasoning about all 3 references (including the two pre-existing
+ones), correctly identifying and naming the real tension between the
+project's "editorial, not corporate" framing and the newly-dropped SaaS-tour
+reference, and explicitly citing both settled decisions by content ("the
+settled fixed-left-rail nav", "the settled serif-display + grotesk-body
+pairing") rather than re-litigating them. `open_questions` was fully
+regenerated with 5 new specific (non-generic) questions. The two original
+`source='user', status='accepted'` decision rows were confirmed byte-for-byte
+unchanged in the database, and exactly one new `source='agent',
+status='proposed'` decision appeared from `proposed_decisions` — the
+append-only guarantee held under a real (not fake-CLI) run. (One false alarm
+during review: the old seed-imported decision text appeared to contain a
+corrupted `�` character when printed through a Python console session;
+`repr()` on the raw stored value confirmed the actual stored codepoint is
+U+2014 (a real em-dash) — a Windows console print-encoding artifact, not a
+data bug. No code changes were needed as a result of this check.)
+
+**Not yet run by:** automated pipeline (same reason as Phase 6 below — no
+real credentials in that environment).
+
+---
+
 ## Phase 6 — Step 5: real end-to-end AI verification
 
 **Status:** PASSED (2026-08-17)
