@@ -92,7 +92,7 @@ COPY seed/ seed/
 # db.init_db() + seed.run_seed_if_empty() at *module import time*, and
 # db.init_db() does DATA_DIR.mkdir(parents=True)/MEDIA_DIR.mkdir(...) -- a
 # non-root UID cannot create a new dir under a root-owned /.
-RUN mkdir -p /data /media && chown -R 10001:10001 /data /media /app
+RUN mkdir -p /data /media && chown -R 10001:10001 /data /media
 
 USER 10001:10001
 EXPOSE 8093
