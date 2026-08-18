@@ -4,6 +4,32 @@ This file tracks manual verification steps required by the project's phase plans
 
 ---
 
+## Phase 8 -- Step: real end-to-end vision analysis verification
+
+**Status:** BLOCKED
+
+**Reason:** No real `CLAUDE_CODE_OAUTH_TOKEN` is available in the automated pipeline's execution environment (same reason as every prior phase's manual-check entries); this is the LEAST-exercised code path in the app -- undocumented CLI stream-json protocol behavior (`--input-format stream-json` + `--output-format stream-json` + `--verbose` composed with `--json-schema` and an image content block), verified only once in the Phase-0 spike, with zero production traffic since; automated tests in this phase run against a fake claude binary and prove the plumbing (flags, stdin envelope shape, NDJSON scanning, schema validation, persistence) is internally consistent, but cannot prove the real CLI actually behaves the way the fake assumes it does.
+
+**What still needs to happen:**
+
+(a) run the web app and worker with a real CLAUDE_CODE_OAUTH_TOKEN set;
+
+(b) upload a real image with 2-3 solid, unambiguous KNOWN colors (e.g. a synthetic PNG with distinct red/green/blue blocks, similar in spirit to the Phase-0 S2 spike's three-known-hex-value test image) through the new upload form;
+
+(c) confirm the resulting item reaches status=ready with swatches whose hex values are close to (allowing for normal color-naming/quantization variance, not hallucination) the image's actual known colors -- the single most load-bearing check in this whole phase, since it is the only thing that proves the stream-json image content block genuinely reached the model rather than silently being ignored (a generic 'I don't see an image' response would look like a technical success while being a total functional failure);
+
+(d) confirm alt_text is populated with a real, non-empty description of what's actually in the image (not the note, not a filename, not empty);
+
+(e) confirm thumb_media_id/media_id both populate and the card renders the uploaded image;
+
+(f) as a regression spot-check in the SAME session, drop one plain text note and confirm it STILL returns swatches=[] and alt_text="" exactly as before this phase (proves the vision path addition didn't leak real-swatch behavior into the text-only path);
+
+(g) update this file's Status to PASSED or FAILED with the date and a summary of what was actually observed, following every prior entry's convention of never editing Status without having actually run the check.
+
+**Not yet run by:** automated pipeline.
+
+---
+
 ## Phase 7 — Step 7: real end-to-end re-synthesis verification
 
 **Status:** PASSED (2026-08-18)
