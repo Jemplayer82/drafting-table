@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     item_id     INTEGER,
+    trigger_item_id INTEGER,
     kind        TEXT NOT NULL,
     status      TEXT NOT NULL,
     phase       TEXT,
@@ -146,7 +147,9 @@ CREATE INDEX IF NOT EXISTS idx_rate_limits_bucket ON rate_limits (bucket, create
 
 # House rule (see TradingAgents/web/db.py): a new column goes in BOTH SCHEMA
 # above (for fresh installs) AND here (for existing databases).
-_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = []
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("jobs", "trigger_item_id", "INTEGER"),
+]
 
 
 def _run_column_migrations(conn: sqlite3.Connection) -> None:
@@ -520,22 +523,27 @@ def complete_job(job_id: int) -> None:
         )
 
 
-def chain_resynthesize_job(project_id: int) -> None:
+def chain_resynthesize_job(
+    project_id: int, trigger_item_id: int | None = None
+) -> None:
     """Debounced insert of a queued 'resynthesize' job. If a queued or running
-    resynthesize job already exists for the project, this is a no-op."""
+    resynthesize job already exists for the project, this is a no-op -- and in
+    that case the ALREADY-QUEUED job's trigger_item_id is NOT overwritten, it
+    keeps whichever item first triggered it. trigger_item_id defaults to None so
+    every existing single-positional-arg call site keeps working unchanged."""
     now = _now()
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO jobs (project_id, kind, status, created_at)
-            SELECT ?, 'resynthesize', 'queued', ?
+            INSERT INTO jobs (project_id, kind, status, trigger_item_id, created_at)
+            SELECT ?, 'resynthesize', 'queued', ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM jobs
                 WHERE project_id = ? AND kind = 'resynthesize'
                   AND status IN ('queued', 'running')
             )
             """,
-            (project_id, now, project_id),
+            (project_id, trigger_item_id, now, project_id),
         )
 
 

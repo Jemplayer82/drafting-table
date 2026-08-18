@@ -791,6 +791,125 @@ def test_chain_resynthesize_job_inserts_fresh_after_prior_done(app_env):
     assert count == 2
 
 
+def test_chain_resynthesize_job_stores_trigger_item_id(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Trigger Item", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+
+    db.chain_resynthesize_job(pid, trigger_item_id=item_id)
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT trigger_item_id FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()
+    assert row["trigger_item_id"] == item_id
+
+
+def test_chain_resynthesize_job_defaults_trigger_item_id_to_none_when_omitted(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("No Trigger", None)
+
+    db.chain_resynthesize_job(pid)
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT trigger_item_id FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()
+    assert row["trigger_item_id"] is None
+
+
+def test_chain_resynthesize_job_debounce_does_not_overwrite_existing_trigger_item_id(
+    app_env,
+):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Debounce Trigger", None)
+
+    db.chain_resynthesize_job(pid, trigger_item_id=1)
+    db.chain_resynthesize_job(pid, trigger_item_id=2)
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT trigger_item_id FROM jobs WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["trigger_item_id"] == 1
+
+
+def test_resynthesize_job_trigger_item_id_is_independent_of_item_id_column(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Independent", None)
+    with db.connect() as conn:
+        item_id = _insert_item(conn, pid, db, position=0)
+
+    db.chain_resynthesize_job(pid, trigger_item_id=item_id)
+
+    with db.connect() as conn:
+        job = conn.execute(
+            "SELECT item_id, trigger_item_id FROM jobs "
+            "WHERE project_id = ? AND kind = 'resynthesize'",
+            (pid,),
+        ).fetchone()
+
+    assert job["item_id"] is None
+    assert job["trigger_item_id"] == item_id
+    assert db.live_jobs_by_item(pid) == {}
+
+
+def test_init_db_migrates_trigger_item_id_column(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()  # ensure DATA_DIR and DB file exist before connect()
+    # Simulate an existing DB whose jobs table predates trigger_item_id.
+    with db.connect() as conn:
+        conn.execute("DROP TABLE IF EXISTS jobs")
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                item_id INTEGER,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                phase TEXT,
+                worker_id TEXT,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                heartbeat_at TEXT,
+                finished_at TEXT
+            )
+            """
+        )
+    db.init_db()
+
+    with db.connect() as conn:
+        cols = {
+            row["name"]: row["type"]
+            for row in conn.execute("PRAGMA table_info(jobs)")
+        }
+    assert "trigger_item_id" in cols
+    assert cols["trigger_item_id"] == "INTEGER"
+
+
 def test_fail_job_with_item_id_marks_both_job_and_item_failed(app_env):
     import db
 
