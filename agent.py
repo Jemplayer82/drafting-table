@@ -293,17 +293,27 @@ def run_claude(
         except json.JSONDecodeError as exc:
             raise AgentProcessError(_scrub_error_text(stdout_text)) from exc
 
+        if not isinstance(envelope, dict):
+            raise AgentProcessError(
+                _scrub_error_text("claude CLI response was not a JSON object")
+            )
+
         if envelope.get("is_error"):
             result_msg = str(envelope.get("result") or "claude CLI reported an error")
             raise AgentProcessError(_scrub_error_text(result_msg))
 
         structured = envelope.get("structured_output")
         if not isinstance(structured, dict):
-            try:
-                structured = json.loads(envelope["result"])
-            except (KeyError, json.JSONDecodeError) as exc:
+            result = envelope.get("result")
+            if not isinstance(result, str):
                 raise AgentProcessError(
-                    "claude CLI response had no structured_output"
+                    _scrub_error_text("claude CLI response had no structured_output")
+                )
+            try:
+                structured = json.loads(result)
+            except json.JSONDecodeError as exc:
+                raise AgentProcessError(
+                    _scrub_error_text("claude CLI response had no structured_output")
                 ) from exc
 
         _validate_against_schema(structured, schema)
