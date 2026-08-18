@@ -11,6 +11,7 @@ from flask import Flask, Response, g, jsonify, redirect, render_template, reques
 
 import auth
 import db
+import media as media_lib
 import seed
 
 
@@ -45,6 +46,7 @@ db.init_db()
 seed.run_seed_if_empty()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 
 _PUBLIC_PATHS = {"/login", "/healthz"}
 _MEDIA_ID_RE = re.compile(r"[0-9a-f]{32}")
@@ -293,6 +295,27 @@ def item_drop(project_id):
         item_id, _job_id = db.create_url_and_ingest_job(project_id, raw_text)
     else:
         item_id, _job_id = db.create_note_and_ingest_job(project_id, raw_text)
+    return redirect(f"/p/{slug}#item-{item_id}")
+
+
+@app.route("/api/projects/<int:project_id>/upload", methods=["POST"])
+def item_upload(project_id):
+    proj = _project_or_404(project_id)
+    if proj is None:
+        return "", 404
+    slug = proj["slug"]
+    uploaded_file = request.files.get("file")
+    if uploaded_file is None or not uploaded_file.filename:
+        return _render_project(slug, item_error="Choose an image file to upload.")
+    data = uploaded_file.read()
+    if not data:
+        return _render_project(slug, item_error="Choose an image file to upload.")
+    try:
+        img = media_lib.decode_and_validate(data)
+        media_id = media_lib.store_full_image(img)
+    except media_lib.MediaValidationError as exc:
+        return _render_project(slug, item_error=str(exc))
+    item_id, _job_id = db.create_image_and_ingest_job(project_id, media_id)
     return redirect(f"/p/{slug}#item-{item_id}")
 
 
