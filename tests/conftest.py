@@ -123,8 +123,14 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         shebang = f"#!{sys.executable}"
         runpy_line = f"import runpy; runpy.run_path(r'{impl_path}', run_name='__main__')"
         launcher_body = f"{shebang}\n{runpy_line}\n"
-        launcher_path.chmod(0o755)
     launcher_path.write_text(launcher_body, encoding="utf-8")
+    if sys.platform != "win32":
+        # chmod() requires the file to already exist -- must run after
+        # write_text() creates it, not before. This ordering bug meant the
+        # POSIX branch of this fixture (and every test using it) has never
+        # actually worked on Linux/macOS; only Windows CI/dev ever exercised
+        # the working .ps1 branch, so it went undetected until real CI ran.
+        launcher_path.chmod(0o755)
 
     def configure(
         *,

@@ -734,6 +734,7 @@ def test_run_claude_vision_no_result_event_raises_agent_process_error(
 ) -> None:
     py_script = tmp_path / "no_result_event.py"
     py_script.write_text(
+        f"#!{sys.executable}\n"
         "import sys\n"
         "print('{\\\"type\\\": \\\"system\\\"}')\n"
         "print('{\\\"type\\\": \\\"assistant\\\"}')\n"
@@ -748,6 +749,10 @@ def test_run_claude_vision_no_result_event_raises_agent_process_error(
         )
         monkeypatch.setenv("CLAUDE_BIN", str(ps1))
     else:
+        # A plain text file has no valid exec format on its own -- without a
+        # shebang line, execve() rejects it with ENOEXEC ("Exec format
+        # error") since CLAUDE_BIN is set to this file directly, not spawned
+        # via `sys.executable <script>`.
         py_script.chmod(0o755)
         monkeypatch.setenv("CLAUDE_BIN", str(py_script))
 
