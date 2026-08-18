@@ -1,0 +1,65 @@
+# Placeholder families used in this file:
+#   PLACEHOLDER_HOST_SECRETS_DIR  -> host directory holding the three secret files
+#   PLACEHOLDER_NPM_SHARED_NETWORK -> external Docker network shared with NPM
+# Both must be replaced with real values by the deploying orchestrator.
+
+x-app-common: &app-common
+  image: ghcr.io/jemplayer82/drafting-table:latest
+  restart: unless-stopped
+  environment:
+    DATA_DIR: /data
+    MEDIA_DIR: /media
+    ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_password_hash
+    SESSION_SECRET_FILE: /run/secrets/session_secret
+    CLAUDE_CODE_OAUTH_TOKEN_FILE: /run/secrets/claude_code_oauth_token
+  volumes:
+    - type: bind
+      source: /PLACEHOLDER_HOST_SECRETS_DIR/admin_password_hash
+      target: /run/secrets/admin_password_hash
+      read_only: true
+    - type: bind
+      source: /PLACEHOLDER_HOST_SECRETS_DIR/session_secret
+      target: /run/secrets/session_secret
+      read_only: true
+    - type: bind
+      source: /PLACEHOLDER_HOST_SECRETS_DIR/claude_code_oauth_token
+      target: /run/secrets/claude_code_oauth_token
+      read_only: true
+    - type: volume
+      source: dt_data
+      target: /data
+    - type: volume
+      source: dt_media
+      target: /media
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+
+services:
+  web:
+    <<: *app-common
+    command: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:8093 --timeout 60
+    expose:
+      - "8093"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8093/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - PLACEHOLDER_NPM_SHARED_NETWORK
+
+  worker:
+    <<: *app-common
+    command: python -m worker
+    pids_limit: 64
+
+volumes:
+  dt_data:
+  dt_media:
+
+networks:
+  PLACEHOLDER_NPM_SHARED_NETWORK:
+    external: true
