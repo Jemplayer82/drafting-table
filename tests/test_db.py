@@ -1430,6 +1430,50 @@ def test_get_resynthesis_context_project_name_matches(app_env):
     assert ctx["project_name"] == "Specific Name"
 
 
+def test_get_resynthesis_context_rollback_on_mid_transaction_failure(app_env, monkeypatch):
+    import sqlite3
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Rollback Mid-Transaction", None)
+    with db.connect() as conn:
+        _insert_ready_item(conn, pid, db, title="Swatchy Item")
+
+    executed: list[str] = []
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            executed.append(sql)
+            if "FROM swatches" in sql:
+                raise RuntimeError("injected swatches failure")
+            return super().execute(sql, *args, **kwargs)
+
+    original_sqlite_connect = sqlite3.connect
+
+    def patched_sqlite_connect(*args, **kwargs):
+        kwargs["factory"] = FailingConnection
+        return original_sqlite_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", patched_sqlite_connect)
+
+    try:
+        db.get_resynthesis_context(pid)
+    except RuntimeError as exc:
+        if "injected swatches failure" not in str(exc):
+            raise AssertionError(f"unexpected RuntimeError: {exc}")
+    else:
+        raise AssertionError("expected injected RuntimeError to propagate")
+
+    assert executed[-1] == "ROLLBACK", executed
+    failure_index = next(
+        (i for i, sql in enumerate(executed) if "FROM swatches" in sql), None
+    )
+    assert failure_index is not None, "swatches SELECT was never reached"
+    after_failure = executed[failure_index + 1 :]
+    assert "COMMIT" not in after_failure, after_failure
+
+
 def test_get_resynthesis_context_empty_project(app_env):
     import db
 
