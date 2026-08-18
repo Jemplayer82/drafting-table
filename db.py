@@ -721,3 +721,169 @@ def live_jobs_by_item(
         return _fetch(conn)
     with connect() as conn:
         return _fetch(conn)
+
+
+# ---------------------------------------------------------------------------
+# Resynthesis context / writes
+# ---------------------------------------------------------------------------
+
+
+def get_resynthesis_context(project_id: int) -> dict:
+    """Gathers everything agent.resynthesize_project() needs in one read: project
+    name, up to 25 most-recently-updated status='ready' items (oldest-of-the-25
+    first, so the digest built from this list reads chronologically), each item's
+    swatches, every currently-live accepted decision (status='accepted' AND
+    superseded_by IS NULL), and the current synthesis row if one exists (highest
+    version). NEVER reads media_id/thumb_media_id/thumb_w/thumb_h/raw_text/
+    alt_text or any other blob-adjacent column -- only id/title/tag/note_md/
+    source_url/kind per item, and 'id' is stripped from the returned item dicts
+    (used internally only, to batch-attach swatches). Does NOT enforce the
+    '>=3 ready items' product threshold -- callers (worker.py) check
+    context['item_count'] themselves before deciding whether to call the agent
+    at all; this function must not crash for a project with 0 ready items. Runs
+    on one connection under a plain BEGIN (not BEGIN IMMEDIATE -- read-only, no
+    need to contend for a write lock) so all reads reflect one consistent
+    snapshot, matching app.py's _render_project's own reasoning for doing the
+    same thing."""
+    with connect() as conn:
+        conn.execute("BEGIN")
+        try:
+            proj = conn.execute(
+                "SELECT name FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            item_rows = conn.execute(
+                "SELECT id, title, tag, note_md, source_url, kind FROM items "
+                "WHERE project_id = ? AND status = 'ready' "
+                "ORDER BY updated_at DESC LIMIT 25",
+                (project_id,),
+            ).fetchall()
+            item_rows = list(reversed(item_rows))  # oldest-of-the-25 first
+            swatches_by_item: dict[int, list[dict]] = {}
+            if item_rows:
+                ids = [r["id"] for r in item_rows]
+                placeholders = ",".join("?" * len(ids))
+                swatch_rows = conn.execute(
+                    f"SELECT item_id, hex, label FROM swatches "
+                    f"WHERE item_id IN ({placeholders}) ORDER BY item_id, position",
+                    ids,
+                ).fetchall()
+                for row in swatch_rows:
+                    swatches_by_item.setdefault(row["item_id"], []).append(
+                        {"hex": row["hex"], "label": row["label"]}
+                    )
+            decision_rows = conn.execute(
+                "SELECT body_md, rationale_md FROM decisions "
+                "WHERE project_id = ? AND status = 'accepted' AND superseded_by IS NULL "
+                "ORDER BY created_at",
+                (project_id,),
+            ).fetchall()
+            synth_row = conn.execute(
+                "SELECT version, direction_md, questions_json FROM syntheses "
+                "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    items = [
+        {
+            "title": r["title"],
+            "tag": r["tag"],
+            "note_md": r["note_md"],
+            "source_url": r["source_url"],
+            "kind": r["kind"],
+            "swatches": swatches_by_item.get(r["id"], []),
+        }
+        for r in item_rows
+    ]
+    return {
+        "project_name": proj["name"] if proj else "",
+        "items": items,
+        "item_count": len(items),
+        "accepted_decisions": [
+            {"body_md": r["body_md"], "rationale_md": r["rationale_md"]}
+            for r in decision_rows
+        ],
+        "previous_synthesis": (
+            {
+                "version": synth_row["version"],
+                "direction_md": synth_row["direction_md"],
+                "questions_json": synth_row["questions_json"],
+            }
+            if synth_row
+            else None
+        ),
+    }
+
+
+def propose_decision(
+    project_id: int, body_md: str, rationale_md: str | None, job_id: int
+) -> int:
+    """Inserts a new decisions row: source='agent', status='proposed',
+    superseded_by=NULL, decided_at=NULL (both omitted from the INSERT column
+    list, so they default to NULL -- neither column has a DEFAULT clause; NULL
+    is simply what an omitted nullable column gets). Single-statement write,
+    atomic under connect()'s autocommit mode. THIS IS THE ONLY WRITE PATH the
+    agent-driven resynthesis code may ever use to touch the decisions table --
+    it must NEVER UPDATE or DELETE any existing decisions row; that absence of
+    any UPDATE/DELETE is the entire safety property the append-only decisions
+    guarantee depends on. Do not wrap this call in any try/except that could
+    swallow a failure. Returns the new row's id."""
+    now = _now()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "job_id, created_at) VALUES (?, ?, ?, 'agent', 'proposed', ?, ?)",
+            (project_id, body_md, rationale_md, job_id, now),
+        )
+        return cur.lastrowid
+
+
+def insert_synthesis(
+    project_id: int,
+    direction_md: str,
+    questions_json: str,
+    item_count: int,
+    trigger_item_id: int | None,
+    job_id: int,
+) -> int:
+    """INSERTs one new syntheses row at version = COALESCE(MAX(version),0)+1 for
+    this project, computed as part of the SAME atomic SQL statement as the
+    INSERT itself (INSERT ... SELECT ... is one write statement; under
+    connect()'s autocommit/isolation_level=None mode SQLite still wraps a
+    single statement in its own implicit transaction and serializes writers at
+    the file level -- the same single-statement atomicity claim_next_job's
+    UPDATE...WHERE and chain_resynthesize_job's INSERT...WHERE NOT EXISTS
+    already rely on elsewhere in this file -- so this is race-safe against a
+    concurrent second resynthesize job for the same project with no explicit
+    BEGIN IMMEDIATE needed). An aggregate query with no GROUP BY always returns
+    exactly one row even when zero rows match project_id, so this also
+    correctly produces version=1 on a project's first-ever synthesis with no
+    special-casing. NEVER UPDATEs or DELETEs an existing syntheses row --
+    versioned history is append-only by construction, mirroring the decisions
+    guarantee. Does NOT catch sqlite3.IntegrityError from the
+    UNIQUE(project_id, version) constraint -- if it somehow fires, the job must
+    fail loudly, never silently. model is hardcoded to 'claude-sonnet-5',
+    matching run_claude's own default. Returns the new row's id."""
+    now = _now()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "model, item_count, trigger_item_id, job_id, created_at) "
+            "SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?, ?, ?, ? "
+            "FROM syntheses WHERE project_id = ?",
+            (
+                project_id,
+                direction_md,
+                questions_json,
+                "claude-sonnet-5",
+                item_count,
+                trigger_item_id,
+                job_id,
+                now,
+                project_id,
+            ),
+        )
+        return cur.lastrowid

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import threading
 
 
 def test_init_db_is_idempotent(app_env):
@@ -117,6 +118,28 @@ def _insert_job(
             (item_id, job_id),
         )
     return job_id
+
+
+def _insert_ready_item(
+    conn,
+    project_id,
+    db,
+    *,
+    title=None,
+    tag=None,
+    note_md=None,
+    source_url=None,
+    kind="note",
+    updated_at=None,
+):
+    updated_at = updated_at or db._now()
+    cur = conn.execute(
+        "INSERT INTO items (project_id, kind, status, title, tag, note_md, source_url, "
+        "position, created_at, updated_at) "
+        "VALUES (?, ?, 'ready', ?, ?, ?, ?, 0, ?, ?)",
+        (project_id, kind, title, tag, note_md, source_url, updated_at, updated_at),
+    )
+    return cur.lastrowid
 
 
 def test_move_item_swaps_positions(app_env):
@@ -1213,3 +1236,395 @@ def test_insert_media_inserts_row_matching_given_fields(app_env):
     assert row["height"] == 900
     assert row["byte_size"] == 45678
     assert row["created_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Resynthesis context / write tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_resynthesis_context_only_ready_items(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Ready Filter", None)
+    with db.connect() as conn:
+        _insert_ready_item(conn, pid, db, title="R1")
+        _insert_ready_item(conn, pid, db, title="R2")
+        _insert_ready_item(conn, pid, db, title="R3")
+        conn.execute(
+            "INSERT INTO items (project_id, kind, status, position, created_at, updated_at) "
+            "VALUES (?, ?, 'pending', 0, ?, ?)",
+            (pid, "note", db._now(), db._now()),
+        )
+        conn.execute(
+            "INSERT INTO items (project_id, kind, status, position, created_at, updated_at) "
+            "VALUES (?, ?, 'failed', 0, ?, ?)",
+            (pid, "note", db._now(), db._now()),
+        )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert ctx["item_count"] == 3
+    assert {it["title"] for it in ctx["items"]} == {"R1", "R2", "R3"}
+
+
+def test_get_resynthesis_context_caps_at_25_and_orders_oldest_first(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Cap Order", None)
+    with db.connect() as conn:
+        for i in range(30):
+            _insert_ready_item(
+                conn,
+                pid,
+                db,
+                title=f"Item {i}",
+                updated_at=f"2026-01-01T00:{i:02d}:00+00:00",
+            )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert len(ctx["items"]) == 25
+    assert ctx["item_count"] == 25
+    assert ctx["items"][0]["title"] == "Item 5"
+    assert ctx["items"][-1]["title"] == "Item 29"
+    present = {it["title"] for it in ctx["items"]}
+    for excluded in (f"Item {i}" for i in range(5)):
+        assert excluded not in present
+    for included in (f"Item {i}" for i in range(5, 30)):
+        assert included in present
+
+
+def test_get_resynthesis_context_swatches_attach_in_order(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Swatches", None)
+    with db.connect() as conn:
+        item_id = _insert_ready_item(conn, pid, db, title="Swatched")
+
+    db.replace_swatches(
+        item_id,
+        [{"hex": "#111111", "label": "a"}, {"hex": "#222222", "label": "b"}],
+    )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert len(ctx["items"]) == 1
+    assert ctx["items"][0]["swatches"] == [
+        {"hex": "#111111", "label": "a"},
+        {"hex": "#222222", "label": "b"},
+    ]
+
+
+def test_get_resynthesis_context_accepted_decisions_only_live(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Decisions", None)
+    live_id = db.insert_decision(pid, "Live decision", "rationale live")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "created_at) VALUES (?, ?, ?, 'agent', 'proposed', ?)",
+            (pid, "Proposed decision", "rationale proposed", db._now()),
+        )
+        cur = conn.execute(
+            "INSERT INTO decisions (project_id, body_md, rationale_md, source, status, "
+            "created_at) VALUES (?, ?, ?, 'user', 'accepted', ?)",
+            (pid, "Superseded decision", "rationale old", db._now()),
+        )
+        superseded_id = cur.lastrowid
+        conn.execute(
+            "UPDATE decisions SET superseded_by = ? WHERE id = ?",
+            (live_id, superseded_id),
+        )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert len(ctx["accepted_decisions"]) == 1
+    assert ctx["accepted_decisions"][0]["body_md"] == "Live decision"
+    assert ctx["accepted_decisions"][0]["rationale_md"] == "rationale live"
+
+
+def test_get_resynthesis_context_previous_synthesis_reflects_highest_version(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth History", None)
+
+    ctx0 = db.get_resynthesis_context(pid)
+    assert ctx0["previous_synthesis"] is None
+
+    with db.connect() as conn:
+        now = db._now()
+        conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "created_at) VALUES (?, 1, 'direction one', '[\"q1\"]', ?)",
+            (pid, now),
+        )
+        conn.execute(
+            "INSERT INTO syntheses (project_id, version, direction_md, questions_json, "
+            "created_at) VALUES (?, 2, 'direction two', '[\"q2\"]', ?)",
+            (pid, now),
+        )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert ctx["previous_synthesis"] is not None
+    assert ctx["previous_synthesis"]["version"] == 2
+    assert ctx["previous_synthesis"]["direction_md"] == "direction two"
+    assert ctx["previous_synthesis"]["questions_json"] == '[\"q2\"]'
+
+
+def test_get_resynthesis_context_does_not_read_blob_columns(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("No Blobs", None)
+    with db.connect() as conn:
+        item_id = _insert_ready_item(
+            conn,
+            pid,
+            db,
+            title="No Blobs",
+            note_md="a note",
+            source_url="https://example.com",
+            kind="url",
+        )
+        conn.execute(
+            "UPDATE items SET media_id = ?, thumb_media_id = ?, thumb_w = 10, "
+            "thumb_h = 20, raw_text = 'raw', alt_text = 'alt' WHERE id = ?",
+            ("media-1", "thumb-1", item_id),
+        )
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert set(ctx["items"][0].keys()) == {
+        "title",
+        "tag",
+        "note_md",
+        "source_url",
+        "kind",
+        "swatches",
+    }
+
+
+def test_get_resynthesis_context_project_name_matches(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Specific Name", None)
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert ctx["project_name"] == "Specific Name"
+
+
+def test_get_resynthesis_context_empty_project(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Empty", None)
+
+    ctx = db.get_resynthesis_context(pid)
+
+    assert ctx["project_name"] == "Empty"
+    assert ctx["item_count"] == 0
+    assert ctx["items"] == []
+    assert ctx["accepted_decisions"] == []
+    assert ctx["previous_synthesis"] is None
+
+
+def test_propose_decision_creates_proposed_agent_row(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Propose", None)
+
+    did = db.propose_decision(pid, "Body text", "Rationale text", 123)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM decisions WHERE id = ?", (did,)).fetchone()
+    assert row["project_id"] == pid
+    assert row["body_md"] == "Body text"
+    assert row["rationale_md"] == "Rationale text"
+    assert row["source"] == "agent"
+    assert row["status"] == "proposed"
+    assert row["superseded_by"] is None
+    assert row["decided_at"] is None
+    assert row["job_id"] == 123
+
+
+def test_propose_decision_stores_none_rationale(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Propose None", None)
+
+    did = db.propose_decision(pid, "Body only", None, 456)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM decisions WHERE id = ?", (did,)).fetchone()
+    assert row["rationale_md"] is None
+
+
+def test_propose_decision_never_mutates_existing_rows(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Propose Append", None)
+    existing_id = db.insert_decision(pid, "Original", "Original rationale")
+    with db.connect() as conn:
+        snapshot = dict(
+            conn.execute("SELECT * FROM decisions WHERE id = ?", (existing_id,)).fetchone()
+        )
+
+    did1 = db.propose_decision(pid, "Proposal 1", None, 1)
+    did2 = db.propose_decision(pid, "Proposal 2", "r2", 2)
+
+    with db.connect() as conn:
+        existing = dict(
+            conn.execute("SELECT * FROM decisions WHERE id = ?", (existing_id,)).fetchone()
+        )
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions WHERE project_id = ?", (pid,)
+        ).fetchone()["n"]
+
+    assert existing == snapshot
+    assert total == 3
+    assert did1 != existing_id
+    assert did2 != existing_id
+    assert did1 != did2
+
+
+def test_insert_synthesis_first_call_version_one_and_model(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Insert", None)
+
+    sid = db.insert_synthesis(pid, "direction", "[]", 3, None, 7)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM syntheses WHERE id = ?", (sid,)).fetchone()
+    assert row["version"] == 1
+    assert row["model"] == "claude-sonnet-5"
+
+
+def test_insert_synthesis_second_call_increments_version_and_preserves_first(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Versions", None)
+
+    sid1 = db.insert_synthesis(pid, "first direction", "[]", 1, None, 1)
+    sid2 = db.insert_synthesis(pid, "second direction", "[]", 2, None, 2)
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, version, direction_md FROM syntheses "
+            "WHERE project_id = ? ORDER BY version",
+            (pid,),
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["id"] == sid1
+    assert rows[0]["version"] == 1
+    assert rows[0]["direction_md"] == "first direction"
+    assert rows[1]["id"] == sid2
+    assert rows[1]["version"] == 2
+    assert rows[1]["direction_md"] == "second direction"
+
+
+def test_insert_synthesis_stores_fields_exactly(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Fields", None)
+    with db.connect() as conn:
+        item_id = _insert_ready_item(conn, pid, db, title="Trigger")
+
+    sid = db.insert_synthesis(pid, "dir", '[\"q\"]', 5, item_id, 42)
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM syntheses WHERE id = ?", (sid,)).fetchone()
+    assert row["direction_md"] == "dir"
+    assert row["questions_json"] == '[\"q\"]'
+    assert row["item_count"] == 5
+    assert row["trigger_item_id"] == item_id
+    assert row["job_id"] == 42
+
+
+def test_insert_synthesis_three_calls_preserve_version_one(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Immutable", None)
+
+    sid1 = db.insert_synthesis(pid, "v1 dir", "[]", 1, None, 1)
+    with db.connect() as conn:
+        snapshot = dict(
+            conn.execute("SELECT * FROM syntheses WHERE id = ?", (sid1,)).fetchone()
+        )
+
+    db.insert_synthesis(pid, "v2 dir", "[]", 2, None, 2)
+    db.insert_synthesis(pid, "v3 dir", "[]", 3, None, 3)
+
+    with db.connect() as conn:
+        v1 = dict(conn.execute("SELECT * FROM syntheses WHERE id = ?", (sid1,)).fetchone())
+    assert v1 == snapshot
+
+
+def test_insert_synthesis_race_safety_under_concurrent_threads(app_env):
+    import db
+
+    importlib.reload(db)
+    db.init_db()
+    pid, _ = db.create_project("Synth Race", None)
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def worker(direction, job_id):
+        try:
+            barrier.wait()
+            db.insert_synthesis(pid, direction, "[]", 1, None, job_id)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker, args=("dir X", 1))
+    t2 = threading.Thread(target=worker, args=("dir Y", 2))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert errors == []
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT version, direction_md FROM syntheses "
+            "WHERE project_id = ? ORDER BY version",
+            (pid,),
+        ).fetchall()
+    versions = [r["version"] for r in rows]
+    directions = {r["direction_md"] for r in rows}
+    assert len(rows) == 2
+    assert set(versions) == {1, 2}
+    assert directions == {"dir X", "dir Y"}
